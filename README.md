@@ -19,8 +19,8 @@ copy .env.example .env
 Open `.env` and set both values:
 
 ```env
-TMT_API_KEY=YOUR_API_KEY
-TMT_API_ENDPOINT=YOUR_API_ENDPOINT
+TMT_API_KEY=team_xxxxxxxxxxxxxxxx
+TMT_API_ENDPOINT=https://tmt.ilprl.ku.edu.np/lang-translate
 ```
 
 What each value means:
@@ -81,6 +81,13 @@ Important: the browser does not parse `.env` at runtime.
 4. Confirm `config.js` is generated.
 5. Load or reload extension from `chrome://extensions/`.
 
+### Which files you should edit vs not edit
+
+- `.env` for your local key and endpoint.
+- `.env.example` only if the expected variable names change for the whole team.
+- Do not edit manually: `config.js` (it is generated).
+- Usually do not need to edit: `background.js` unless API behavior changes.
+
 ## Full quick start
 
 1. Clone the repository.
@@ -127,3 +134,10 @@ If translation is not working, check in this order:
 5. Refreshed the target webpage.
 
 If it still fails, your token may be invalid or expired.
+
+## Relevant files
+
+- `.env.example`: sample credential template
+- `scripts/generate-config.mjs`: converts `.env` to `config.js`
+- `config.js`: generated runtime config used by extension
+- `background.js`: sends API requests using generated config

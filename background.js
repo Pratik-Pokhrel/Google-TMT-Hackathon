@@ -9,213 +9,175 @@ function hasValidConfig() {
   );
 }
 
-const RATE_WINDOW_MS = 60_000;
-const MAX_REQUESTS_PER_WINDOW = 55;
-const RATE_LIMIT_BUFFER_MS = 250;
-const requestTimestamps = [];
-let requestQueue = Promise.resolve();
-
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function waitForRequestSlot() {
-  while (true) {
-    const now = Date.now();
+// ─────────────────────────────────────────────────────────────────────────────
+// PER-TAB QUEUES
+//
+// Each tab gets its own isolated queue. Only the queue belonging to the
+// currently active/focused tab is allowed to drain — all others are paused.
+// This means:
+//   • Switching tabs immediately stops spending API quota on the background tab
+//   • Coming back to a tab resumes exactly where it left off
+//   • Rate limit (60 req/min) is respected globally via MIN_REQUEST_GAP_MS
+// ─────────────────────────────────────────────────────────────────────────────
+const MIN_REQUEST_GAP_MS = 1100;   // ~54 req/min — safe under the 60/min limit
+let lastRequestTime = 0;
+let backoffUntil = 0;
+let activeTabId = null;            // currently focused tab
 
-    while (
-      requestTimestamps.length > 0 &&
-      now - requestTimestamps[0] >= RATE_WINDOW_MS
-    ) {
-      requestTimestamps.shift();
-    }
+// Map<tabId, { queue: Array, isRunning: boolean }>
+const tabQueues = new Map();
 
-    if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
-      requestTimestamps.push(now);
-      return;
-    }
-
-    const waitMs =
-      RATE_WINDOW_MS - (now - requestTimestamps[0]) + RATE_LIMIT_BUFFER_MS;
-    await sleep(waitMs);
+function getTabQueue(tabId) {
+  if (!tabQueues.has(tabId)) {
+    tabQueues.set(tabId, { queue: [], isRunning: false });
   }
+  return tabQueues.get(tabId);
 }
 
-function runWithRequestLimit(task) {
-  const run = requestQueue.then(async () => {
-    await waitForRequestSlot();
-    return task();
+function enqueueForTab(tabId, fn) {
+  return new Promise((resolve, reject) => {
+    const tq = getTabQueue(tabId);
+    tq.queue.push({ fn, resolve, reject });
+    if (!tq.isRunning) drainTab(tabId);
   });
-
-  requestQueue = run.catch(() => {});
-  return run;
 }
 
-async function fetchTranslation(text, srcLang, tgtLang, attempt = 0) {
-  if (!hasValidConfig()) {
-    console.error(
-      "[TMT] Missing API configuration. Run: node scripts/generate-config.mjs",
-    );
-    return { success: false, text };
+async function drainTab(tabId) {
+  const tq = getTabQueue(tabId);
+  tq.isRunning = true;
+
+  while (tq.queue.length > 0) {
+    // Pause if this tab is not the active one — poll every 300ms until it is
+    while (tabId !== activeTabId) {
+      await sleep(300);
+      // If the tab was closed, discard its queue entirely
+      if (!tabQueues.has(tabId)) { tq.isRunning = false; return; }
+    }
+
+    // Global 429 backoff
+    const now = Date.now();
+    if (now < backoffUntil) await sleep(backoffUntil - now);
+
+    // Global minimum gap between API requests
+    const sinceLast = Date.now() - lastRequestTime;
+    if (sinceLast < MIN_REQUEST_GAP_MS) await sleep(MIN_REQUEST_GAP_MS - sinceLast);
+
+    const item = tq.queue.shift();
+    if (!item) break;
+
+    lastRequestTime = Date.now();
+    try {
+      item.resolve(await item.fn());
+    } catch (err) {
+      item.reject(err);
+    }
   }
 
-  return runWithRequestLimit(async () => {
+  tq.isRunning = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TAB LIFECYCLE — track active tab, clean up closed tabs
+// ─────────────────────────────────────────────────────────────────────────────
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  activeTabId = tabId;
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  chrome.tabs.query({ active: true, windowId }, (tabs) => {
+    if (tabs[0]) activeTabId = tabs[0].id;
+  });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabQueues.delete(tabId);
+});
+
+// Initialise activeTabId on service worker startup
+chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  if (tabs[0]) activeTabId = tabs[0].id;
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FETCH — one text, one API call
+// ─────────────────────────────────────────────────────────────────────────────
+async function doFetch(text, srcLang, tgtLang) {
+  try {
+    const response = await fetch(API_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({ text, src_lang: srcLang, tgt_lang: tgtLang }),
+    });
+
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("Retry-After");
+      const waitMs = retryAfter ? parseFloat(retryAfter) * 1000 : 61000;
+      console.warn(`[TMT] Rate limited. Backing off ${Math.ceil(waitMs / 1000)}s.`);
+      backoffUntil = Date.now() + waitMs;
+      // Re-queue and retry after backoff (uses same tabId via closure in caller)
+      return null; // signal to caller to re-enqueue
+    }
+
+    const raw = await response.text();
+    let data;
     try {
-      const response = await fetch(API_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${API_KEY}`,
-        },
-        body: JSON.stringify({ text, src_lang: srcLang, tgt_lang: tgtLang }),
-      });
-
-      if (response.status === 429) {
-        if (attempt < 2) {
-          const retryAfterHeader = response.headers.get("Retry-After");
-          const retryAfterSeconds = Number(retryAfterHeader);
-          const waitMs =
-            Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-              ? retryAfterSeconds * 1000
-              : RATE_WINDOW_MS + RATE_LIMIT_BUFFER_MS;
-
-          console.warn(
-            `[TMT] Rate limited by API. Retrying in ${Math.ceil(waitMs / 1000)}s.`,
-          );
-          await sleep(waitMs);
-          return fetchTranslation(text, srcLang, tgtLang, attempt + 1);
-        }
-
-        console.error("[TMT] Rate limit reached after retries.");
-        return { success: false, text };
-      }
-
-      const raw = await response.text();
-      let data = null;
-
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        const preview = raw.slice(0, 120).replace(/\s+/g, " ");
-        console.error(
-          `[TMT] API returned non-JSON response (HTTP ${response.status}): ${preview}`,
-        );
-        return { success: false, text };
-      }
-
-      if (!response.ok) {
-        console.error(
-          `[TMT] API error (HTTP ${response.status}): ${data?.message || "Unknown error"}`,
-        );
-        return { success: false, text };
-      }
-
-      if (data.message_type === "SUCCESS") {
-        return { success: true, text: data.output };
-      } else {
-        console.warn("[TMT] API FAIL:", data.message, "| Input:", text);
-        return { success: false, text };
-      }
-    } catch (error) {
-      console.error("[TMT] Network error:", error);
+      data = JSON.parse(raw);
+    } catch {
+      console.error(`[TMT] Non-JSON response (HTTP ${response.status}):`, raw.slice(0, 120));
       return { success: false, text };
     }
-  });
-}
 
-const SEPARATOR = " ||||| ";
-const MAX_CHUNK_CHARS = 300;
-const CONCURRENT_REQUESTS = 4;
-
-function buildChunks(indexedTexts) {
-  const chunks = [];
-  let current = { indices: [], texts: [], joined: "" };
-
-  for (const { text, originalIndex } of indexedTexts) {
-    const wouldBe = current.joined ? current.joined + SEPARATOR + text : text;
-
-    if (current.joined && wouldBe.length > MAX_CHUNK_CHARS) {
-      chunks.push(current);
-      current = { indices: [originalIndex], texts: [text], joined: text };
-    } else {
-      current.indices.push(originalIndex);
-      current.texts.push(text);
-      current.joined = wouldBe;
+    if (!response.ok) {
+      console.error(`[TMT] API error (HTTP ${response.status}):`, data?.message);
+      return { success: false, text };
     }
-  }
-  if (current.indices.length > 0) chunks.push(current);
-  return chunks;
-}
 
-async function applyChunkResult(chunk, srcLang, tgtLang, results) {
-  const result = await fetchTranslation(chunk.joined, srcLang, tgtLang);
-  if (!result.success) return;
-
-  const parts = result.text.split(SEPARATOR);
-
-  // If separator-based splitting breaks, translate one by one to keep node mapping stable.
-  if (parts.length !== chunk.indices.length) {
-    await Promise.all(
-      chunk.texts.map(async (originalText, idx) => {
-        const single = await fetchTranslation(originalText, srcLang, tgtLang);
-        if (!single.success) return;
-
-        const origIdx = chunk.indices[idx];
-        const translated = single.text?.trim();
-        if (translated) results[origIdx] = translated;
-      }),
-    );
-    return;
-  }
-
-  chunk.indices.forEach((origIdx, partIdx) => {
-    const translated = parts[partIdx]?.trim();
-    if (translated) results[origIdx] = translated;
-  });
-}
-
-async function fetchBatchTranslation(texts, srcLang, tgtLang) {
-  const results = [...texts];
-
-  const indexedTexts = texts
-    .map((text, i) => ({ text: text.trim(), originalIndex: i }))
-    .filter((x) => x.text.length > 0);
-
-  if (indexedTexts.length === 0) return results;
-
-  const chunks = buildChunks(indexedTexts);
-
-  for (let i = 0; i < chunks.length; i += CONCURRENT_REQUESTS) {
-    const batch = chunks.slice(i, i + CONCURRENT_REQUESTS);
-
-    await Promise.all(
-      batch.map((chunk) => applyChunkResult(chunk, srcLang, tgtLang, results)),
-    );
-
-    // Small pause avoids bursty traffic and keeps the page responsive.
-    if (i + CONCURRENT_REQUESTS < chunks.length) {
-      await new Promise((r) => setTimeout(r, 80));
+    if (data.message_type === "SUCCESS") {
+      return { success: true, text: data.output };
     }
-  }
 
-  return results;
+    console.warn("[TMT] API FAIL:", data.message, "| Input:", text);
+    return { success: false, text };
+  } catch (err) {
+    console.error("[TMT] Network error:", err);
+    return { success: false, text };
+  }
 }
 
+function translateOne(tabId, text, srcLang, tgtLang) {
+  if (!hasValidConfig()) {
+    console.error("[TMT] Missing config. Run: node scripts/generate-config.mjs");
+    return Promise.resolve({ success: false, text });
+  }
+
+  const attempt = () =>
+    enqueueForTab(tabId, async () => {
+      const result = await doFetch(text, srcLang, tgtLang);
+      // null = was rate-limited, retry
+      if (result === null) return enqueueForTab(tabId, () => doFetch(text, srcLang, tgtLang));
+      return result;
+    });
+
+  return attempt();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MESSAGE LISTENER
+// ─────────────────────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "translate") {
-    fetchTranslation(request.text, request.srcLang, request.tgtLang)
+    const tabId = sender.tab?.id ?? activeTabId;
+    translateOne(tabId, request.text, request.srcLang, request.tgtLang)
       .then((result) => sendResponse(result))
-      .catch(() => sendResponse({ success: false, error: "Unexpected error" }));
-    return true;
-  }
-
-  if (request.action === "translateBatch") {
-    fetchBatchTranslation(request.texts, request.srcLang, request.tgtLang)
-      .then((translated) => sendResponse({ success: true, texts: translated }))
-      .catch((err) => {
-        console.error("[TMT] Batch error:", err);
-        sendResponse({ success: false, error: "Batch translation failed" });
-      });
+      .catch(() => sendResponse({ success: false, text: request.text }));
     return true;
   }
 });

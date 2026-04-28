@@ -111,6 +111,33 @@ mainToggle.addEventListener("change", async () => {
     return;
   }
 
+  // PDF pages (chrome-extension://.../.../pdf or chrome://pdf-viewer) use a
+  // sandboxed viewer — content scripts cannot run inside them. We detect this
+  // and tell the user to enable the setting instead.
+  const isPdfViewer =
+    tab.url?.startsWith("chrome-extension://") && tab.url?.includes("pdf") ||
+    tab.url?.endsWith(".pdf");
+
+  if (isPdfViewer) {
+    setStatus("error", "Open PDF as text (not viewer) to translate");
+    updateToggleUI(false);
+    chrome.storage.local.set({ isOn: false });
+    return;
+  }
+
+  // For file:// URLs the user must have "Allow access to file URLs" enabled
+  // in chrome://extensions for this extension. We can detect it and warn.
+  if (tab.url?.startsWith("file://")) {
+    const extInfo = await chrome.management.getSelf().catch(() => null);
+    // management API not always available; fall through and let injection fail naturally
+    if (extInfo && !extInfo.hostPermissions?.includes("file://*/*")) {
+      setStatus("error", 'Enable "Allow access to file URLs" in chrome://extensions');
+      updateToggleUI(false);
+      chrome.storage.local.set({ isOn: false });
+      return;
+    }
+  }
+
   try {
     await chrome.tabs.sendMessage(tab.id, { action: "ping" });
   } catch (e) {
@@ -121,7 +148,13 @@ mainToggle.addEventListener("change", async () => {
         files: ["content.js"],
       });
     } catch (injectErr) {
-      setStatus("error", "Can't inject on this page");
+      const isFile = tab.url?.startsWith("file://");
+      setStatus(
+        "error",
+        isFile
+          ? 'Enable "Allow access to file URLs" in chrome://extensions'
+          : "Can't inject on this page",
+      );
       updateToggleUI(false);
       chrome.storage.local.set({ isOn: false });
       return;

@@ -46,6 +46,25 @@ function validateLanguages() {
   return true;
 }
 
+async function restartTranslationIfActive() {
+  if (!isOn) return;
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id) return;
+
+  try {
+    await chrome.tabs.sendMessage(tab.id, { action: "stopTranslation" });
+    await chrome.tabs.sendMessage(tab.id, {
+      action: "startTranslation",
+      srcLang: srcLangSelect.value,
+      tgtLang: tgtLangSelect.value,
+    });
+    setStatus("success", "Translating page");
+  } catch (e) {
+    setStatus("error", "Failed to restart translation");
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   chrome.storage.local.get(["isOn", "srcLang", "tgtLang"], (data) => {
     if (data.srcLang) srcLangSelect.value = data.srcLang;
@@ -70,6 +89,7 @@ swapBtn.addEventListener("click", () => {
     srcLang: srcLangSelect.value,
     tgtLang: tgtLangSelect.value,
   });
+  restartTranslationIfActive();
 });
 
 chips.forEach((chip) => {
@@ -81,17 +101,20 @@ chips.forEach((chip) => {
       srcLang: chip.dataset.src,
       tgtLang: chip.dataset.tgt,
     });
+    restartTranslationIfActive();
   });
 });
 
 srcLangSelect.addEventListener("change", () => {
   setActiveChip(srcLangSelect.value, tgtLangSelect.value);
   chrome.storage.local.set({ srcLang: srcLangSelect.value });
+  restartTranslationIfActive();
 });
 
 tgtLangSelect.addEventListener("change", () => {
   setActiveChip(srcLangSelect.value, tgtLangSelect.value);
   chrome.storage.local.set({ tgtLang: tgtLangSelect.value });
+  restartTranslationIfActive();
 });
 
 mainToggle.addEventListener("change", async () => {
@@ -115,7 +138,7 @@ mainToggle.addEventListener("change", async () => {
   // sandboxed viewer — content scripts cannot run inside them. We detect this
   // and tell the user to enable the setting instead.
   const isPdfViewer =
-    tab.url?.startsWith("chrome-extension://") && tab.url?.includes("pdf") ||
+    (tab.url?.startsWith("chrome-extension://") && tab.url?.includes("pdf")) ||
     tab.url?.endsWith(".pdf");
 
   if (isPdfViewer) {
@@ -131,7 +154,10 @@ mainToggle.addEventListener("change", async () => {
     const extInfo = await chrome.management.getSelf().catch(() => null);
     // management API not always available; fall through and let injection fail naturally
     if (extInfo && !extInfo.hostPermissions?.includes("file://*/*")) {
-      setStatus("error", 'Enable "Allow access to file URLs" in chrome://extensions');
+      setStatus(
+        "error",
+        'Enable "Allow access to file URLs" in chrome://extensions',
+      );
       updateToggleUI(false);
       chrome.storage.local.set({ isOn: false });
       return;

@@ -23,10 +23,10 @@ function sleep(ms) {
 //   • Coming back to a tab resumes exactly where it left off
 //   • Rate limit (60 req/min) is respected globally via MIN_REQUEST_GAP_MS
 // ─────────────────────────────────────────────────────────────────────────────
-const MIN_REQUEST_GAP_MS = 1100;   // ~54 req/min — safe under the 60/min limit
+const MIN_REQUEST_GAP_MS = 1100; // ~54 req/min — safe under the 60/min limit
 let lastRequestTime = 0;
 let backoffUntil = 0;
-let activeTabId = null;            // currently focused tab
+let activeTabId = null; // currently focused tab
 
 // Map<tabId, { queue: Array, isRunning: boolean }>
 const tabQueues = new Map();
@@ -55,7 +55,10 @@ async function drainTab(tabId) {
     while (tabId !== activeTabId) {
       await sleep(300);
       // If the tab was closed, discard its queue entirely
-      if (!tabQueues.has(tabId)) { tq.isRunning = false; return; }
+      if (!tabQueues.has(tabId)) {
+        tq.isRunning = false;
+        return;
+      }
     }
 
     // Global 429 backoff
@@ -64,7 +67,8 @@ async function drainTab(tabId) {
 
     // Global minimum gap between API requests
     const sinceLast = Date.now() - lastRequestTime;
-    if (sinceLast < MIN_REQUEST_GAP_MS) await sleep(MIN_REQUEST_GAP_MS - sinceLast);
+    if (sinceLast < MIN_REQUEST_GAP_MS)
+      await sleep(MIN_REQUEST_GAP_MS - sinceLast);
 
     const item = tq.queue.shift();
     if (!item) break;
@@ -108,6 +112,13 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 // ─────────────────────────────────────────────────────────────────────────────
 async function doFetch(text, srcLang, tgtLang) {
   try {
+    try {
+      console.debug("[TMT] background -> doFetch", {
+        srcLang,
+        tgtLang,
+        text: text.slice(0, 120),
+      });
+    } catch (e) {}
     const response = await fetch(API_ENDPOINT, {
       method: "POST",
       headers: {
@@ -120,7 +131,9 @@ async function doFetch(text, srcLang, tgtLang) {
     if (response.status === 429) {
       const retryAfter = response.headers.get("Retry-After");
       const waitMs = retryAfter ? parseFloat(retryAfter) * 1000 : 61000;
-      console.warn(`[TMT] Rate limited. Backing off ${Math.ceil(waitMs / 1000)}s.`);
+      console.warn(
+        `[TMT] Rate limited. Backing off ${Math.ceil(waitMs / 1000)}s.`,
+      );
       backoffUntil = Date.now() + waitMs;
       // Re-queue and retry after backoff (uses same tabId via closure in caller)
       return null; // signal to caller to re-enqueue
@@ -131,12 +144,18 @@ async function doFetch(text, srcLang, tgtLang) {
     try {
       data = JSON.parse(raw);
     } catch {
-      console.error(`[TMT] Non-JSON response (HTTP ${response.status}):`, raw.slice(0, 120));
+      console.error(
+        `[TMT] Non-JSON response (HTTP ${response.status}):`,
+        raw.slice(0, 120),
+      );
       return { success: false, text };
     }
 
     if (!response.ok) {
-      console.error(`[TMT] API error (HTTP ${response.status}):`, data?.message);
+      console.error(
+        `[TMT] API error (HTTP ${response.status}):`,
+        data?.message,
+      );
       return { success: false, text };
     }
 
@@ -154,7 +173,9 @@ async function doFetch(text, srcLang, tgtLang) {
 
 function translateOne(tabId, text, srcLang, tgtLang) {
   if (!hasValidConfig()) {
-    console.error("[TMT] Missing config. Run: node scripts/generate-config.mjs");
+    console.error(
+      "[TMT] Missing config. Run: node scripts/generate-config.mjs",
+    );
     return Promise.resolve({ success: false, text });
   }
 
@@ -162,7 +183,8 @@ function translateOne(tabId, text, srcLang, tgtLang) {
     enqueueForTab(tabId, async () => {
       const result = await doFetch(text, srcLang, tgtLang);
       // null = was rate-limited, retry
-      if (result === null) return enqueueForTab(tabId, () => doFetch(text, srcLang, tgtLang));
+      if (result === null)
+        return enqueueForTab(tabId, () => doFetch(text, srcLang, tgtLang));
       return result;
     });
 
@@ -175,6 +197,14 @@ function translateOne(tabId, text, srcLang, tgtLang) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "translate") {
     const tabId = sender.tab?.id ?? activeTabId;
+    try {
+      console.debug("[TMT] background -> received translate", {
+        tabId,
+        src: request.srcLang,
+        tgt: request.tgtLang,
+        text: (request.text || "").slice(0, 120),
+      });
+    } catch (e) {}
     translateOne(tabId, request.text, request.srcLang, request.tgtLang)
       .then((result) => sendResponse(result))
       .catch(() => sendResponse({ success: false, text: request.text }));

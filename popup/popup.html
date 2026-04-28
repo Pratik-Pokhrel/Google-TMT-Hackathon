@@ -9,61 +9,59 @@
 </head>
 
 <body>
-  <div class="container">
-    <header class="header">
-      <p class="brand">TMT WEB TRANSLATOR</p>
-      <p class="subtitle">Classic page language switcher</p>
-    </header>
+  <header class="header">
+    <p class="brand">TMT WEB TRANSLATOR</p>
+  </header>
 
-    <section class="lang-section">
-      <div class="lang-row">
-        <div class="lang-block">
-          <label class="lang-label">Source</label>
-          <select id="srcLang" class="lang-select">
-            <option value="en">English</option>
-            <option value="ne">Nepali</option>
-            <option value="Tamang">Tamang</option>
-          </select>
-        </div>
-
-        <button class="swap-btn" id="swapBtn" title="Swap languages" aria-label="Swap languages">↔</button>
-
-        <div class="lang-block">
-          <label class="lang-label">Target</label>
-          <select id="tgtLang" class="lang-select">
-            <option value="ne">Nepali</option>
-            <option value="en">English</option>
-            <option value="Tamang">Tamang</option>
-          </select>
-        </div>
+  <section class="lang-section">
+    <div class="lang-row">
+      <div class="lang-block">
+        <label class="lang-label">Source</label>
+        <select id="srcLang" class="lang-select">
+          <option value="en">English</option>
+          <option value="ne">Nepali</option>
+          <option value="Tamang">Tamang</option>
+        </select>
       </div>
 
-      <div class="direction-chips">
-        <button class="chip active" data-src="en" data-tgt="ne">EN→NE</button>
-        <button class="chip" data-src="en" data-tgt="Tamang">EN→TM</button>
-        <button class="chip" data-src="ne" data-tgt="Tamang">NE→TM</button>
-        <button class="chip" data-src="ne" data-tgt="en">NE→EN</button>
-        <button class="chip" data-src="Tamang" data-tgt="en">TM→EN</button>
-        <button class="chip" data-src="Tamang" data-tgt="ne">TM→NE</button>
-      </div>
-    </section>
+      <button class="swap-btn" id="swapBtn" title="Swap languages" aria-label="Swap languages">↔</button>
 
-    <section class="toggle-section">
-      <div class="toggle-label-row">
-        <span class="toggle-label" id="statusLabel">Translation OFF</span>
-        <label class="toggle-switch">
-          <input type="checkbox" id="mainToggle" />
-          <span class="slider"></span>
-        </label>
+      <div class="lang-block">
+        <label class="lang-label">Target</label>
+        <select id="tgtLang" class="lang-select">
+          <option value="ne">Nepali</option>
+          <option value="en">English</option>
+          <option value="Tamang">Tamang</option>
+        </select>
       </div>
-      <p class="toggle-hint" id="toggleHint">Toggle to translate this page</p>
-    </section>
-
-    <div class="status-bar" id="statusBar">
-      <span class="status-dot" id="statusDot"></span>
-      <span id="statusText">Ready</span>
     </div>
+
+    <div class="direction-chips">
+      <button class="chip active" data-src="en" data-tgt="ne">EN→NE</button>
+      <button class="chip" data-src="en" data-tgt="Tamang">EN→TM</button>
+      <button class="chip" data-src="ne" data-tgt="Tamang">NE→TM</button>
+      <button class="chip" data-src="ne" data-tgt="en">NE→EN</button>
+      <button class="chip" data-src="Tamang" data-tgt="en">TM→EN</button>
+      <button class="chip" data-src="Tamang" data-tgt="ne">TM→NE</button>
+    </div>
+  </section>
+
+  <section class="toggle-section">
+    <div class="toggle-label-row">
+      <span class="toggle-label" id="statusLabel">Translation OFF</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="mainToggle" />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <p class="toggle-hint" id="toggleHint">Toggle to translate this page</p>
+  </section>
+
+  <div class="status-bar" id="statusBar">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">Ready</span>
   </div>
+
   <script src="popup.js"></script>
 </body>
 

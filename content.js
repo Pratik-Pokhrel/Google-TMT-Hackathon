@@ -5,9 +5,25 @@ let mutationObserver = null;
 
 const TRANSLATED_ATTR = "data-tmt-done";
 const SKIP_TAGS = new Set([
-  "SCRIPT", "STYLE", "NOSCRIPT", "CODE", "PRE", "KBD",
-  "SAMP", "VAR", "TEXTAREA", "INPUT", "SELECT", "OPTION",
-  "HEAD", "META", "LINK", "IFRAME", "SVG", "MATH", "CANVAS",
+  "SCRIPT",
+  "STYLE",
+  "NOSCRIPT",
+  "CODE",
+  "PRE",
+  "KBD",
+  "SAMP",
+  "VAR",
+  "TEXTAREA",
+  "INPUT",
+  "SELECT",
+  "OPTION",
+  "HEAD",
+  "META",
+  "LINK",
+  "IFRAME",
+  "SVG",
+  "MATH",
+  "CANVAS",
 ]);
 
 // Stores original nodeValue for every node we translate.
@@ -28,9 +44,9 @@ function getTextNodes(root) {
         if (!text || text.trim().length < 2) return NodeFilter.FILTER_SKIP;
         let el = node.parentElement;
         while (el) {
-          if (SKIP_TAGS.has(el.tagName))          return NodeFilter.FILTER_REJECT;
-          if (el.isContentEditable)               return NodeFilter.FILTER_REJECT;
-          if (el.hasAttribute(TRANSLATED_ATTR))   return NodeFilter.FILTER_REJECT;
+          if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
+          if (el.isContentEditable) return NodeFilter.FILTER_REJECT;
+          if (el.hasAttribute(TRANSLATED_ATTR)) return NodeFilter.FILTER_REJECT;
           if (el === document.body) break;
           el = el.parentElement;
         }
@@ -47,8 +63,25 @@ function markTranslated(node) {
   let el = node.parentElement;
   while (el && el !== document.body) {
     const tag = el.tagName;
-    if (["P","H1","H2","H3","H4","H5","H6","LI","TD","TH",
-         "SPAN","A","LABEL","BUTTON","DIV"].includes(tag)) {
+    if (
+      [
+        "P",
+        "H1",
+        "H2",
+        "H3",
+        "H4",
+        "H5",
+        "H6",
+        "LI",
+        "TD",
+        "TH",
+        "SPAN",
+        "A",
+        "LABEL",
+        "BUTTON",
+        "DIV",
+      ].includes(tag)
+    ) {
       el.setAttribute(TRANSLATED_ATTR, "1");
       return;
     }
@@ -58,9 +91,9 @@ function markTranslated(node) {
 }
 
 function unmarkTranslated() {
-  document.querySelectorAll(`[${TRANSLATED_ATTR}]`).forEach((el) =>
-    el.removeAttribute(TRANSLATED_ATTR)
-  );
+  document
+    .querySelectorAll(`[${TRANSLATED_ATTR}]`)
+    .forEach((el) => el.removeAttribute(TRANSLATED_ATTR));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,21 +125,37 @@ function translateOneNode(node, srcLang, tgtLang) {
   // Save original before the first translation of this node
   if (!originalTexts.has(node)) originalTexts.set(node, original);
 
-  const leading  = original.match(/^\s*/)?.[0]  || "";
-  const trailing = original.match(/\s*$/)?.[0]  || "";
+  const leading = original.match(/^\s*/)?.[0] || "";
+  const trailing = original.match(/\s*$/)?.[0] || "";
 
   return new Promise((resolve) => {
+    // Debug: log outgoing translate requests from the content script
+    try {
+      console.debug("[TMT] content -> sendMessage translate", {
+        srcLang,
+        tgtLang,
+        text: text.slice(0, 120),
+      });
+    } catch (e) {
+      // ignore console slicing errors in exotic environments
+    }
+
     chrome.runtime.sendMessage(
       { action: "translate", text, srcLang, tgtLang },
       (response) => {
-        if (chrome.runtime.lastError) { resolve(); return; }
+        if (chrome.runtime.lastError) {
+          resolve();
+          return;
+        }
         if (response?.success && response.text && response.text !== text) {
           if (mutationObserver) mutationObserver.disconnect();
           node.nodeValue = leading + response.text + trailing;
           markTranslated(node);
           if (mutationObserver && isTranslating) {
             mutationObserver.observe(document.body, {
-              childList: true, subtree: true, characterData: false,
+              childList: true,
+              subtree: true,
+              characterData: false,
             });
           }
         }
@@ -155,7 +204,8 @@ function startObserver(srcLang, tgtLang) {
           const text = added.nodeValue;
           if (text && text.trim().length > 1) {
             const parent = added.parentElement;
-            if (parent && !parent.hasAttribute(TRANSLATED_ATTR)) pending.add(added);
+            if (parent && !parent.hasAttribute(TRANSLATED_ATTR))
+              pending.add(added);
           }
         } else if (added.nodeType === Node.ELEMENT_NODE) {
           getTextNodes(added).forEach((n) => pending.add(n));
@@ -172,7 +222,9 @@ function startObserver(srcLang, tgtLang) {
   });
 
   mutationObserver.observe(document.body, {
-    childList: true, subtree: true, characterData: false,
+    childList: true,
+    subtree: true,
+    characterData: false,
   });
 }
 
@@ -190,15 +242,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "startTranslation") {
     currentSrcLang = request.srcLang;
     currentTgtLang = request.tgtLang;
+    console.debug("[TMT] content -> startTranslation", {
+      src: currentSrcLang,
+      tgt: currentTgtLang,
+    });
     translatePage(currentSrcLang, currentTgtLang);
     startObserver(currentSrcLang, currentTgtLang);
     sendResponse({ success: true });
   }
 
   if (request.action === "stopTranslation") {
-    isTranslating = false;   // stops any in-progress translateNodes loop
+    isTranslating = false; // stops any in-progress translateNodes loop
     stopObserver();
-    restorePage();            // revert all translations in-place — no reload
+    restorePage(); // revert all translations in-place — no reload
     sendResponse({ success: true });
   }
 

@@ -19,8 +19,8 @@ copy .env.example .env
 Open `.env` and set both values:
 
 ```env
-TMT_API_KEY=team_xxxxxxxxxxxxxxxx
-TMT_API_ENDPOINT=https://tmt.ilprl.ku.edu.np/lang-translate
+TMT_API_KEY=YOUR_API_KEY
+TMT_API_ENDPOINT=YOUR_API_ENDPOINT
 ```
 
 What each value means:

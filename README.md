@@ -134,10 +134,3 @@ If translation is not working, check in this order:
 5. Refreshed the target webpage.
 
 If it still fails, your token may be invalid or expired.
-
-## Relevant files
-
-- `.env.example`: sample credential template
-- `scripts/generate-config.mjs`: converts `.env` to `config.js`
-- `config.js`: generated runtime config used by extension
-- `background.js`: sends API requests using generated config

@@ -11,11 +11,17 @@ const chips = document.querySelectorAll(".chip");
 
 let isOn = false;
 
+// Update the visual status indicator in the popup. The function sets the
+// colored dot class and updates the status text. Use types like "ready",
+// "loading", "success", and "error" to match existing styles.
 function setStatus(type, message) {
   statusDot.className = "status-dot " + type;
   statusText.textContent = message;
 }
 
+// Visually mark the chip that matches the given source and target languages.
+// This keeps the quick presets in sync with the selects and provides a clear
+// active state for the user.
 function setActiveChip(src, tgt) {
   chips.forEach((chip) => {
     chip.classList.toggle(
@@ -25,6 +31,9 @@ function setActiveChip(src, tgt) {
   });
 }
 
+// Update the popup UI to reflect whether translation is enabled. This updates
+// the toggle state, labels, and hint text so the popup accurately describes
+// the current behavior without performing any network actions.
 function updateToggleUI(on) {
   isOn = on;
   mainToggle.checked = on;
@@ -36,6 +45,9 @@ function updateToggleUI(on) {
     : "Toggle to translate this page";
 }
 
+// Check that the selected source and target languages are valid for
+// translation. The main validation rule is that they must not be identical.
+// Returns true when the selection is acceptable.
 function validateLanguages() {
   const src = srcLangSelect.value;
   const tgt = tgtLangSelect.value;
@@ -46,6 +58,10 @@ function validateLanguages() {
   return true;
 }
 
+// If translation is currently enabled, stop and restart the translation
+// pipeline on the active tab. This is used when language settings change so
+// the new languages are applied immediately without requiring the user to
+// toggle the main switch.
 async function restartTranslationIfActive() {
   if (!isOn) return;
 
@@ -117,6 +133,10 @@ tgtLangSelect.addEventListener("change", () => {
   restartTranslationIfActive();
 });
 
+// Handle the user toggling the main translation switch. This performs
+// validation, updates the UI state, persists the choice, ensures the content
+// script is injected, and then sends start or stop commands to the content
+// script on the active tab.
 mainToggle.addEventListener("change", async () => {
   const turnOn = mainToggle.checked;
 
@@ -134,35 +154,7 @@ mainToggle.addEventListener("change", async () => {
     return;
   }
 
-  // PDF pages (chrome-extension://.../.../pdf or chrome://pdf-viewer) use a
-  // sandboxed viewer — content scripts cannot run inside them. We detect this
-  // and tell the user to enable the setting instead.
-  const isPdfViewer =
-    (tab.url?.startsWith("chrome-extension://") && tab.url?.includes("pdf")) ||
-    tab.url?.endsWith(".pdf");
-
-  if (isPdfViewer) {
-    setStatus("error", "Open PDF as text (not viewer) to translate");
-    updateToggleUI(false);
-    chrome.storage.local.set({ isOn: false });
-    return;
-  }
-
-  // For file:// URLs the user must have "Allow access to file URLs" enabled
-  // in chrome://extensions for this extension. We can detect it and warn.
-  if (tab.url?.startsWith("file://")) {
-    const extInfo = await chrome.management.getSelf().catch(() => null);
-    // management API not always available; fall through and let injection fail naturally
-    if (extInfo && !extInfo.hostPermissions?.includes("file://*/*")) {
-      setStatus(
-        "error",
-        'Enable "Allow access to file URLs" in chrome://extensions',
-      );
-      updateToggleUI(false);
-      chrome.storage.local.set({ isOn: false });
-      return;
-    }
-  }
+  // Proceed to ensure the content script is available on the page.
 
   try {
     await chrome.tabs.sendMessage(tab.id, { action: "ping" });
@@ -174,13 +166,7 @@ mainToggle.addEventListener("change", async () => {
         files: ["content.js"],
       });
     } catch (injectErr) {
-      const isFile = tab.url?.startsWith("file://");
-      setStatus(
-        "error",
-        isFile
-          ? 'Enable "Allow access to file URLs" in chrome://extensions'
-          : "Can't inject on this page",
-      );
+      setStatus("error", "Can't inject on this page");
       updateToggleUI(false);
       chrome.storage.local.set({ isOn: false });
       return;

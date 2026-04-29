@@ -3,34 +3,39 @@
 }
 
 :root {
-  --bg: #eaefef;
-  --surface: #ffffff;
-  --surface-soft: #f7f9f9;
-  --line: rgba(0, 0, 0, 0.12);
-  --line-strong: rgba(0, 0, 0, 0.18);
-  --accent: #ff9b51;
-  --accent-soft: #bfc9d1;
-  --on: #64a86f;
-  --on-soft: #cfe9d6;
-  --ink: #1a2127;
-  --ink-soft: #4d5b66;
-  --ink-muted: #66727b;
-  --error: #b75f4a;
+  --bg: #fff4e7;
+  --surface: #fff9f2;
+  --surface-soft: #ffefdc;
+  --line: rgba(92, 48, 18, 0.16);
+  --line-strong: rgba(92, 48, 18, 0.28);
+  --accent: #df6a21;
+  --accent-soft: #f8dbc0;
+  --on: #35a66a;
+  --on-soft: #d9efdf;
+  --ink: #2d180d;
+  --ink-soft: #5f3a22;
+  --ink-muted: #8a6042;
+  --error: #bf3f2b;
+  --panel-top: #fff7ed;
+  --panel-bottom: #ffdcb9;
 }
 
 body {
   width: 320px;
-  margin: 10px;
+  margin: 8px;
   padding: 13px;
   color: var(--ink);
   font-family: "Segoe UI", "Inter", Arial, sans-serif;
   font-weight: 500;
-  background: #cbf5e0;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 204, 154, 0.8), transparent 54%),
+    radial-gradient(circle at 88% 90%, rgba(238, 146, 66, 0.35), transparent 48%),
+    linear-gradient(165deg, var(--panel-top) 0%, var(--panel-bottom) 100%);
   border: 1px solid var(--line-strong);
   border-radius: 16px;
   box-shadow:
-    0 12px 28px rgba(37, 52, 63, 0.10),
-    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+    0 12px 28px rgba(80, 35, 10, 0.22),
+    0 1px 0 rgba(255, 248, 236, 0.75) inset;
 }
 
 html {
@@ -88,12 +93,12 @@ html {
   background: var(--surface);
   color: var(--ink);
   font: 600 13px "Segoe UI", "Inter", Arial, sans-serif;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  box-shadow: inset 0 1px 0 rgba(255, 248, 236, 0.9);
   appearance: none;
 }
 
 .lang-select:focus {
-  outline: 2px solid rgba(255, 155, 81, 0.22);
+  outline: 2px solid rgba(223, 106, 33, 0.28);
   border-color: var(--accent);
 }
 
@@ -107,13 +112,13 @@ html {
   font-size: 17px;
   font-weight: 700;
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(37, 52, 63, 0.06);
+  box-shadow: 0 1px 2px rgba(86, 42, 12, 0.12);
   transition: transform 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
 }
 
 .swap-btn:hover {
   border-color: var(--accent);
-  box-shadow: 0 2px 5px rgba(37, 52, 63, 0.10);
+  box-shadow: 0 2px 5px rgba(99, 46, 15, 0.18);
   transform: translateY(-1px);
 }
 
@@ -133,7 +138,7 @@ html {
   letter-spacing: 0.5px;
   padding: 6px 10px;
   cursor: pointer;
-  box-shadow: 0 1px 2px rgba(37, 52, 63, 0.05);
+  box-shadow: 0 1px 2px rgba(98, 46, 16, 0.12);
   transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 }
 
@@ -143,10 +148,10 @@ html {
 }
 
 .chip.active {
-  background: var(--accent);
+  background: linear-gradient(180deg, #ea7f38 0%, var(--accent) 100%);
   border-color: var(--accent);
-  color: #fff;
-  box-shadow: 0 2px 5px rgba(255, 155, 81, 0.18);
+  color: #fffaf4;
+  box-shadow: 0 2px 5px rgba(223, 106, 33, 0.3);
 }
 
 .toggle-section {
@@ -196,9 +201,9 @@ html {
   inset: 0;
   border-radius: 999px;
   border: 2px solid var(--line-strong);
-  background: #e4eaed;
+  background: #f3e5d6;
   cursor: pointer;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 1px 0 rgba(255, 246, 236, 0.7);
   transition: background 0.2s ease;
 }
 
@@ -218,8 +223,8 @@ input:checked + .slider {
   background: var(--on);
   border: none;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.7),
-    0 2px 6px rgba(100, 168, 111, 0.14);
+    inset 0 1px 0 rgba(255, 250, 240, 0.7),
+    0 2px 6px rgba(204, 123, 44, 0.24);
 }
 
 input:checked + .slider::before {

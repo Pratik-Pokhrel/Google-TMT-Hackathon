@@ -87,31 +87,17 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // BATCH TRANSLATION — combine sentences to reduce API calls
+  // BATCH TRANSLATION — translate individual nodes separately for correctness
   // ─────────────────────────────────────────────────────────────────────────────
-// Max chars per batch; small enough for quick API response
-  const MAX_BATCH_CHARS = 300;
+  // Each node is translated independently to avoid proportional splitting errors.
+  const MAX_BATCH_CHARS = 500; // not used for batching anymore, just a limit check
 
   function batchNodes(nodes) {
-    const batches = [];
-    let current = { nodes: [], text: "", chars: 0 };
-
-    for (const node of nodes) {
-      const txt = (node.nodeValue || "").trim();
-      const len = txt.length;
-
-      if (current.chars + len > MAX_BATCH_CHARS && current.nodes.length > 0) {
-        batches.push(current);
-        current = { nodes: [], text: "", chars: 0 };
-      }
-
-      current.nodes.push(node);
-      current.text += (current.text ? " " : "") + txt;
-      current.chars += len + 1; // +1 for separator
-    }
-
-    if (current.nodes.length > 0) batches.push(current);
-    return batches;
+    // Each node becomes its own batch to ensure accurate translation
+    return nodes.map((node) => ({
+      nodes: [node],
+      text: (node.nodeValue || "").trim(),
+    }));
   }
 
   // Stores original nodeValue for every node we translate.
@@ -205,68 +191,40 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // TRANSLATE ONE BATCH — single API call for a small batch of nodes
+  // TRANSLATE ONE BATCH — translate a single node
   // ─────────────────────────────────────────────────────────────────────────────
   function translateOneBatch(batch, srcLang, tgtLang) {
     const { nodes, text } = batch;
-    if (!text) return Promise.resolve();
+    if (!text || nodes.length === 0) return Promise.resolve();
 
-    // Save originals before translation
-    for (const node of nodes) {
-      if (!originalTexts.has(node)) {
-        originalTexts.set(node, node.nodeValue);
-      }
+    const node = nodes[0]; // Each batch has exactly 1 node now
+
+    // Save original before translation
+    if (!originalTexts.has(node)) {
+      originalTexts.set(node, node.nodeValue);
     }
 
     return new Promise((resolve) => {
-      try {
-        console.debug("[TMT] content -> translate batch", {
-          srcLang,
-          tgtLang,
-          nodeCount: nodes.length,
-          chars: text.length,
-        });
-      } catch (e) {}
-
-      // Send simple, single text to API (no delimiters)
       chrome.runtime.sendMessage(
         { action: "translate", text, srcLang, tgtLang },
         (response) => {
           if (chrome.runtime.lastError) {
+            console.warn("[TMT] Message error:", chrome.runtime.lastError);
             resolve();
             return;
           }
 
-          if (response?.success && response.text && response.text !== text) {
+          if (response?.success && response.text) {
             if (mutationObserver) mutationObserver.disconnect();
 
-            const translated = response.text;
+            // Apply translated text to the single node, preserving whitespace
+            const original = originalTexts.get(node) || node.nodeValue || "";
+            const leading = original.match(/^\s*/)?.[0] || "";
+            const trailing = original.match(/\s*$/)?.[0] || "";
 
-            // For single node, apply directly
-            if (nodes.length === 1) {
-              const node = nodes[0];
-              const original = originalTexts.get(node) || node.nodeValue || "";
-              const leading = original.match(/^\s*/)?.[0] || "";
-              const trailing = original.match(/\s*$/)?.[0] || "";
-              node.nodeValue = leading + translated + trailing;
-              markTranslated(node);
-              nodesTranslated++;
-            } else {
-              // For multiple nodes, apply proportionally
-              const ratio = translated.length / text.length;
-              for (const node of nodes) {
-                const original = originalTexts.get(node) || node.nodeValue || "";
-                const trimmed = original.trim();
-                const expectedChars = Math.max(1, Math.round(trimmed.length * ratio));
-                const leading = original.match(/^\s*/)?.[0] || "";
-                const trailing = original.match(/\s*$/)?.[0] || "";
-
-                node.nodeValue = leading + translated.slice(0, expectedChars) + trailing;
-                markTranslated(node);
-                nodesTranslated++;
-              }
-            }
-
+            node.nodeValue = leading + response.text + trailing;
+            markTranslated(node);
+            nodesTranslated++;
             updateProgressBar();
 
             if (mutationObserver && translationEnabled) {
@@ -277,6 +235,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
               });
             }
           }
+
           resolve();
         },
       );

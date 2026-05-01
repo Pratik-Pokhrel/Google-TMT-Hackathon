@@ -131,53 +131,17 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TRANSLATION CACHE — in-memory + persistent storage
+// FETCH — one text, one API call (no caching)
 // ─────────────────────────────────────────────────────────────────────────────
-// Simple in-memory cache for translations (current session only).
-// Keyed by "srcLang:tgtLang:hash(text)". No TTL, no LRU — just fast lookup.
-const translationCache = new Map();
-
-function getCacheKey(text, srcLang, tgtLang) {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = ((hash << 5) - hash) + text.charCodeAt(i);
-    hash = hash & hash;
-  }
-  return `${srcLang}:${tgtLang}:${Math.abs(hash)}`;
-}
-
-function getCachedTranslation(text, srcLang, tgtLang) {
-  const key = getCacheKey(text, srcLang, tgtLang);
-  return translationCache.get(key) || null;
-}
-
-function setCachedTranslation(text, srcLang, tgtLang, translation) {
-  const key = getCacheKey(text, srcLang, tgtLang);
-  translationCache.set(key, translation);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// FETCH — one text, one API call (with caching)
-// ─────────────────────────────────────────────────────────────────────────────
-// Perform a single translation request to the configured API endpoint. The
-// function sends the text and language parameters and returns a structured
-// result. Checks cache first. On HTTP 429 it sets a global backoff timestamp 
-// and returns null to indicate the caller should retry after backoff.
+// Perform a single translation request to the configured API endpoint.
 async function doFetch(text, srcLang, tgtLang) {
-  // Check cache first
-  const cached = await getCachedTranslation(text, srcLang, tgtLang);
-  if (cached) {
-    return { success: true, text: cached };
-  }
-
   try {
-    try {
-      console.debug("[TMT] background -> doFetch", {
-        srcLang,
-        tgtLang,
-        text: text.slice(0, 120),
-      });
-    } catch (e) {}
+    console.debug("[TMT] background -> doFetch", {
+      srcLang,
+      tgtLang,
+      textLen: text.length,
+    });
+
     const response = await fetch(API_ENDPOINT, {
       method: "POST",
       headers: {
@@ -196,13 +160,11 @@ async function doFetch(text, srcLang, tgtLang) {
         : Number.isFinite(dateRetryAfter)
           ? Math.max(0, dateRetryAfter - Date.now())
           : 61000;
-      // Some gateways send 0/invalid Retry-After; enforce a floor to avoid bursts.
       const waitMs = Math.max(5000, serverWaitMs);
       console.warn(
         `[TMT] Rate limited. Backing off ${Math.ceil(waitMs / 1000)}s.`,
       );
       backoffUntil = Date.now() + waitMs;
-      // Re-queue and retry after backoff (uses same tabId via closure in caller)
       return null; // signal to caller to re-enqueue
     }
 
@@ -213,7 +175,7 @@ async function doFetch(text, srcLang, tgtLang) {
     } catch {
       console.error(
         `[TMT] Non-JSON response (HTTP ${response.status}):`,
-        raw.slice(0, 120),
+        raw.slice(0, 50),
       );
       return { success: false, text };
     }
@@ -227,14 +189,10 @@ async function doFetch(text, srcLang, tgtLang) {
     }
 
     if (data.message_type === "SUCCESS") {
-      const outputText = data.output;
-      const result = { success: true, text: outputText };
-      // Cache the successful translation
-      setCachedTranslation(text, srcLang, tgtLang, outputText);
-      return result;
+      return { success: true, text: data.output };
     }
 
-    console.warn("[TMT] API FAIL:", data.message, "| Input:", text);
+    console.warn("[TMT] API FAIL:", data.message);
     return { success: false, text };
   } catch (err) {
     console.error("[TMT] Network error:", err);

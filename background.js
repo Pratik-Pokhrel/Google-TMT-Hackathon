@@ -131,13 +131,97 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FETCH — one text, one API call
+// TRANSLATION CACHE — in-memory + persistent storage
+// ─────────────────────────────────────────────────────────────────────────────
+// Caches translations to avoid redundant API calls. Stored entries include
+// the translated text and a timestamp to allow TTL-based eviction.
+const translationCache = new Map(); // key -> { value, ts }
+const CACHE_PREFIX = "tmt_cache_";
+const CACHE_MAX_ITEMS = 2000; // in-memory entries cap
+const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+
+function getCacheKey(text, srcLang, tgtLang, contextHash) {
+  // Lightweight deterministic hash (32-bit) to keep keys short.
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(i);
+    hash = hash & hash;
+  }
+  const ctx = contextHash ? `_${contextHash}` : "";
+  return `${CACHE_PREFIX}${srcLang}_${tgtLang}_${Math.abs(hash)}${ctx}`;
+}
+
+function pruneCacheIfNeeded() {
+  while (translationCache.size > CACHE_MAX_ITEMS) {
+    // Map preserves insertion order; evict the oldest
+    const firstKey = translationCache.keys().next().value;
+    translationCache.delete(firstKey);
+  }
+}
+
+async function getCachedTranslation(text, srcLang, tgtLang, contextHash) {
+  const key = getCacheKey(text, srcLang, tgtLang, contextHash);
+
+  // Memory-level lookup
+  const entry = translationCache.get(key);
+  if (entry) {
+    // TTL check
+    if (Date.now() - entry.ts < CACHE_TTL_MS) {
+      // refresh LRU: remove & re-set to move to newest
+      translationCache.delete(key);
+      translationCache.set(key, entry);
+      return entry.value;
+    }
+    translationCache.delete(key);
+  }
+
+  // Persistent storage lookup
+  return new Promise((resolve) => {
+    chrome.storage.local.get([key], (result) => {
+      const v = result?.[key];
+      if (v && v.ts && (Date.now() - v.ts < CACHE_TTL_MS)) {
+        // promote to memory
+        translationCache.set(key, { value: v.value, ts: v.ts });
+        pruneCacheIfNeeded();
+        resolve(v.value);
+      } else {
+        resolve(null);
+      }
+    });
+  });
+}
+
+async function setCachedTranslation(text, srcLang, tgtLang, translation, contextHash) {
+  const key = getCacheKey(text, srcLang, tgtLang, contextHash);
+  const entry = { value: translation, ts: Date.now() };
+  translationCache.set(key, entry);
+  pruneCacheIfNeeded();
+
+  // Persist asynchronously; don't await
+  try {
+    const payload = { [key]: entry };
+    chrome.storage.local.set(payload, () => {
+      // noop
+    });
+  } catch (e) {
+    // ignore storage errors
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FETCH — one text, one API call (with caching)
 // ─────────────────────────────────────────────────────────────────────────────
 // Perform a single translation request to the configured API endpoint. The
 // function sends the text and language parameters and returns a structured
-// result. On HTTP 429 it sets a global backoff timestamp and returns null to
-// indicate the caller should retry after backoff.
+// result. Checks cache first. On HTTP 429 it sets a global backoff timestamp 
+// and returns null to indicate the caller should retry after backoff.
 async function doFetch(text, srcLang, tgtLang) {
+  // Check cache first
+  const cached = await getCachedTranslation(text, srcLang, tgtLang);
+  if (cached) {
+    return { success: true, text: cached };
+  }
+
   try {
     try {
       console.debug("[TMT] background -> doFetch", {
@@ -195,7 +279,10 @@ async function doFetch(text, srcLang, tgtLang) {
     }
 
     if (data.message_type === "SUCCESS") {
-      return { success: true, text: data.output };
+      const result = { success: true, text: data.output };
+      // Cache the successful translation
+      await setCachedTranslation(text, srcLang, tgtLang, data.output);
+      return result;
     }
 
     console.warn("[TMT] API FAIL:", data.message, "| Input:", text);
@@ -252,4 +339,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .catch(() => sendResponse({ success: false, text: request.text }));
     return true;
   }
+    // Bulk cache lookup API used by content scripts to avoid unnecessary
+    // network requests for already-seen sentences. Accepts `texts: string[]`
+    // and returns an object `{ results: { text -> translation|null } }`.
+    if (request.action === "lookupCache") {
+      const texts = Array.isArray(request.texts) ? request.texts : [];
+      const src = request.srcLang;
+      const tgt = request.tgtLang;
+      const contextHashes = request.contextHashes || [];
+      const results = {};
+      const lookups = texts.map((t, i) =>
+        getCachedTranslation(t, src, tgt, contextHashes[i] || null).then((v) => {
+          results[t] = v || null;
+        }),
+      );
+      Promise.all(lookups).then(() => sendResponse({ results }));
+      return true;
+    }
 });

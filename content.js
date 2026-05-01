@@ -15,6 +15,28 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   let currentTgtLang = "ne";
   let mutationObserver = null;
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PROGRESS TRACKING
+  // ─────────────────────────────────────────────────────────────────────────────
+  let totalNodesToTranslate = 0;
+  let nodesTranslated = 0;
+
+  function updateProgressBar() {
+    const percentage = totalNodesToTranslate > 0 
+      ? (nodesTranslated / totalNodesToTranslate) * 100 
+      : 0;
+    
+    // Send progress update to popup
+    try {
+      chrome.runtime.sendMessage({
+        action: "updateProgress",
+        percentage: percentage,
+      });
+    } catch (e) {
+      // Popup not open, ignore
+    }
+  }
+
   const TRANSLATED_ATTR = "data-tmt-done";
   const SKIP_TAGS = new Set([
     "SCRIPT",
@@ -37,6 +59,62 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
     "MATH",
     "CANVAS",
   ]);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // VIEWPORT AWARENESS — prioritize visible content
+  // ─────────────────────────────────────────────────────────────────────────────
+  const visibleNodes = new Set();
+  const intersectionObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        visibleNodes.add(entry.target);
+      } else {
+        visibleNodes.delete(entry.target);
+      }
+    }
+  }, { rootMargin: "200px" }); // 200px buffer for pre-loading
+
+  function isNodeVisible(node) {
+    const el = node.parentElement;
+    return el && visibleNodes.has(el);
+  }
+
+  function prioritizeNodes(nodes) {
+    // Sort: visible nodes first, then rest
+    const visible = nodes.filter(isNodeVisible);
+    const hidden = nodes.filter(n => !isNodeVisible(n));
+    return [...visible, ...hidden];
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // BATCH TRANSLATION — combine sentences to reduce API calls
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Max chars per batch; the API's sentence-level limit is per individual
+  // sentence, but we batch at the content layer to reduce overhead.
+  const MAX_BATCH_CHARS = 500;
+  const BATCH_DELIM = "|||TMT_SPLIT|||"; // safe join delimiter for batch requests
+
+  function batchNodes(nodes) {
+    const batches = [];
+    let current = { nodes: [], text: "", chars: 0 };
+
+    for (const node of nodes) {
+      const txt = (node.nodeValue || "").trim();
+      const len = txt.length;
+
+      if (current.chars + len > MAX_BATCH_CHARS && current.nodes.length > 0) {
+        batches.push(current);
+        current = { nodes: [], text: "", chars: 0 };
+      }
+
+      current.nodes.push(node);
+      current.text += (current.text ? " " : "") + txt;
+      current.chars += len + 1; // +1 for separator
+    }
+
+    if (current.nodes.length > 0) batches.push(current);
+    return batches;
+  }
 
   // Stores original nodeValue for every node we translate.
   // Used to restore the page without a reload when translation is toggled off.
@@ -129,66 +207,126 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // TRANSLATE ONE NODE — single sendMessage, resolves in ~1.1s (queue gap)
+  // TRANSLATE ONE BATCH — single API call for multiple nodes
   // ─────────────────────────────────────────────────────────────────────────────
-  function translateOneNode(node, srcLang, tgtLang) {
-    const original = node.nodeValue || "";
-    const text = original.trim();
+  function translateOneBatch(batch, srcLang, tgtLang) {
+    const { nodes, text } = batch;
     if (!text) return Promise.resolve();
 
-    // Save original before the first translation of this node
-    if (!originalTexts.has(node)) originalTexts.set(node, original);
-
-    const leading = original.match(/^\s*/)?.[0] || "";
-    const trailing = original.match(/\s*$/)?.[0] || "";
+    // Save originals before translation
+    for (const node of nodes) {
+      if (!originalTexts.has(node)) {
+        originalTexts.set(node, node.nodeValue);
+      }
+    }
 
     return new Promise((resolve) => {
-      // Debug: log outgoing translate requests from the content script
       try {
-        console.debug("[TMT] content -> sendMessage translate", {
+        console.debug("[TMT] content -> sendMessage translateBatch", {
           srcLang,
           tgtLang,
+          nodeCount: nodes.length,
           text: text.slice(0, 120),
         });
-      } catch (e) {
-        // ignore console slicing errors in exotic environments
-      }
+      } catch (e) {}
+      // If the batch contains multiple nodes we join with a delimiter so
+      // the translated result can be split back into per-node pieces.
+      const payloadText = nodes.length > 1 ? nodes.map(n => (n.nodeValue || "").trim()).join(BATCH_DELIM) : text;
 
-      chrome.runtime.sendMessage(
-        { action: "translate", text, srcLang, tgtLang },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            resolve();
-            return;
-          }
-          if (response?.success && response.text && response.text !== text) {
-            if (mutationObserver) mutationObserver.disconnect();
-            node.nodeValue = leading + response.text + trailing;
-            markTranslated(node);
-            if (mutationObserver && translationEnabled) {
-              mutationObserver.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: false,
-              });
-            }
-          }
+      chrome.runtime.sendMessage({ action: "translate", text: payloadText, srcLang, tgtLang }, (response) => {
+        if (chrome.runtime.lastError) {
           resolve();
-        },
-      );
+          return;
+        }
+        if (response?.success && response.text && response.text !== payloadText) {
+          if (mutationObserver) mutationObserver.disconnect();
+
+          const translated = response.text;
+          let parts = nodes.length > 1 ? translated.split(BATCH_DELIM) : [translated];
+
+          // Guard: ensure parts length matches nodes; if not, fallback to whole-text replacement
+          if (parts.length !== nodes.length) {
+            parts = nodes.map(() => translated);
+          }
+
+          for (let i = 0; i < nodes.length; i++) {
+            const node = nodes[i];
+            const original = originalTexts.get(node) || node.nodeValue || "";
+            const leading = original.match(/^\s*/)?.[0] || "";
+            const trailing = original.match(/\s*$/)?.[0] || "";
+
+            node.nodeValue = leading + (parts[i] || "") + trailing;
+            markTranslated(node);
+
+            // Track progress per node
+            nodesTranslated++;
+            updateProgressBar();
+          }
+
+          if (mutationObserver && translationEnabled) {
+            mutationObserver.observe(document.body, {
+              childList: true,
+              subtree: true,
+              characterData: false,
+            });
+          }
+        }
+        resolve();
+      });
     });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // TRANSLATE A LIST OF NODES — sequentially
+  // TRANSLATE A LIST OF NODES — by batch (reduced API calls)
   // ─────────────────────────────────────────────────────────────────────────────
   let _pageNodes = [];
 
   async function translateNodes(nodes, srcLang, tgtLang, runId) {
-    for (const node of nodes) {
-      // Bail out immediately if translation was toggled off or restarted mid-run
+    // Prioritize visible content first
+    const sorted = prioritizeNodes(nodes);
+
+    // First, do a bulk cache lookup so cached sentences can be applied
+    // immediately and not sent to the API. This reduces network calls and
+    // improves perceived responsiveness.
+    const texts = sorted.map(n => (n.nodeValue || "").trim());
+    const cacheResp = await new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ action: "lookupCache", texts, srcLang, tgtLang }, (res) => resolve(res));
+      } catch (e) {
+        resolve(null);
+      }
+    });
+
+    const toTranslate = [];
+    if (cacheResp && cacheResp.results) {
+      for (let i = 0; i < sorted.length; i++) {
+        const node = sorted[i];
+        const t = texts[i];
+        const cached = cacheResp.results?.[t];
+        if (cached) {
+          if (!originalTexts.has(node)) originalTexts.set(node, node.nodeValue);
+          const original = originalTexts.get(node) || node.nodeValue || "";
+          const leading = original.match(/^\s*/)?.[0] || "";
+          const trailing = original.match(/\s*$/)?.[0] || "";
+          node.nodeValue = leading + cached + trailing;
+          markTranslated(node);
+          nodesTranslated++;
+          updateProgressBar();
+        } else {
+          toTranslate.push(node);
+        }
+      }
+    } else {
+      // If cache lookup failed, fall back to translating everything
+      toTranslate.push(...sorted);
+    }
+
+    const batches = batchNodes(toTranslate);
+
+    for (const batch of batches) {
+      // Bail out if translation was toggled off or restarted
       if (!translationEnabled || runId !== translationRunId) break;
-      await translateOneNode(node, srcLang, tgtLang);
+      await translateOneBatch(batch, srcLang, tgtLang);
     }
   }
 
@@ -209,16 +347,28 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
     isTranslating = true;
 
     _pageNodes = getTextNodes(document.body);
+    totalNodesToTranslate = _pageNodes.length;
+    nodesTranslated = 0;
+    updateProgressBar();
+
     await enqueueTranslation(_pageNodes, srcLang, tgtLang, runId);
 
     isTranslating = false;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // MUTATION OBSERVER — only new nodes, debounced
+  // MUTATION OBSERVER — only new nodes, debounced; with viewport awareness
   // ─────────────────────────────────────────────────────────────────────────────
   function startObserver(srcLang, tgtLang, runId) {
     if (mutationObserver) mutationObserver.disconnect();
+
+    // Observe all block elements for viewport detection
+    const blocks = document.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, div, article, section");
+    blocks.forEach(el => {
+      if (!visibleNodes.has(el)) {
+        intersectionObserver.observe(el);
+      }
+    });
 
     let debounceTimer = null;
     const pending = new Set();
@@ -236,6 +386,10 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
                 pending.add(added);
             }
           } else if (added.nodeType === Node.ELEMENT_NODE) {
+            // Observe new element for viewport detection
+            if (added.tagName && ["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "DIV", "ARTICLE", "SECTION"].includes(added.tagName)) {
+              intersectionObserver.observe(added);
+            }
             getTextNodes(added).forEach((n) => pending.add(n));
           }
         }
@@ -261,6 +415,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
       mutationObserver.disconnect();
       mutationObserver = null;
     }
+    intersectionObserver.disconnect();
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -286,6 +441,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
         src: currentSrcLang,
         tgt: currentTgtLang,
       });
+
       translatePage(currentSrcLang, currentTgtLang, runId);
       startObserver(currentSrcLang, currentTgtLang, runId);
       sendResponse({ success: true });

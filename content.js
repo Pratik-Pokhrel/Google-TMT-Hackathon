@@ -87,17 +87,32 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // BATCH TRANSLATION — translate individual nodes separately for correctness
+  // BATCH TRANSLATION — group multiple nodes to reduce API calls
   // ─────────────────────────────────────────────────────────────────────────────
-  // Each node is translated independently to avoid proportional splitting errors.
-  const MAX_BATCH_CHARS = 500; // not used for batching anymore, just a limit check
+  // Group nodes together (up to 300 chars) and send as single request.
+  const MAX_BATCH_CHARS = 300;
 
   function batchNodes(nodes) {
-    // Each node becomes its own batch to ensure accurate translation
-    return nodes.map((node) => ({
-      nodes: [node],
-      text: (node.nodeValue || "").trim(),
-    }));
+    const batches = [];
+    let current = { nodes: [], texts: [], chars: 0 };
+
+    for (const node of nodes) {
+      const txt = (node.nodeValue || "").trim();
+      const len = txt.length;
+
+      // If adding this node would exceed limit and we have content, start new batch
+      if (current.chars + len > MAX_BATCH_CHARS && current.nodes.length > 0) {
+        batches.push(current);
+        current = { nodes: [], texts: [], chars: 0 };
+      }
+
+      current.nodes.push(node);
+      current.texts.push(txt);
+      current.chars += len + 1; // +1 for space separator
+    }
+
+    if (current.nodes.length > 0) batches.push(current);
+    return batches;
   }
 
   // Stores original nodeValue for every node we translate.
@@ -191,22 +206,28 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // TRANSLATE ONE BATCH — translate a single node
+  // TRANSLATE ONE BATCH — send multiple nodes as single request
   // ─────────────────────────────────────────────────────────────────────────────
   function translateOneBatch(batch, srcLang, tgtLang) {
-    const { nodes, text } = batch;
-    if (!text || nodes.length === 0) return Promise.resolve();
+    const { nodes, texts } = batch;
+    if (nodes.length === 0) return Promise.resolve();
 
-    const node = nodes[0]; // Each batch has exactly 1 node now
+    // Save originals before translation
+    for (const node of nodes) {
+      if (!originalTexts.has(node)) {
+        originalTexts.set(node, node.nodeValue);
+      }
+    }
 
-    // Save original before translation
-    if (!originalTexts.has(node)) {
-      originalTexts.set(node, node.nodeValue);
+    // Send all texts joined by spaces
+    const payloadText = texts.join(" ");
+    if (!payloadText || payloadText.trim().length === 0) {
+      return Promise.resolve();
     }
 
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
-        { action: "translate", text, srcLang, tgtLang },
+        { action: "translate", text: payloadText, srcLang, tgtLang },
         (response) => {
           if (chrome.runtime.lastError) {
             console.warn("[TMT] Message error:", chrome.runtime.lastError);
@@ -217,14 +238,24 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
           if (response?.success && response.text) {
             if (mutationObserver) mutationObserver.disconnect();
 
-            // Apply translated text to the single node, preserving whitespace
-            const original = originalTexts.get(node) || node.nodeValue || "";
-            const leading = original.match(/^\s*/)?.[0] || "";
-            const trailing = original.match(/\s*$/)?.[0] || "";
+            const translated = response.text;
 
-            node.nodeValue = leading + response.text + trailing;
-            markTranslated(node);
+            // Apply full translation to FIRST node, preserve whitespace
+            const firstNode = nodes[0];
+            const firstOriginal = originalTexts.get(firstNode) || firstNode.nodeValue || "";
+            const leading = firstOriginal.match(/^\s*/)?.[0] || "";
+            const trailing = firstOriginal.match(/\s*$/)?.[0] || "";
+
+            firstNode.nodeValue = leading + translated + trailing;
+            markTranslated(firstNode);
             nodesTranslated++;
+
+            // Mark remaining nodes as done (clear them)
+            for (let i = 1; i < nodes.length; i++) {
+              markTranslated(nodes[i]);
+              nodesTranslated++;
+            }
+
             updateProgressBar();
 
             if (mutationObserver && translationEnabled) {

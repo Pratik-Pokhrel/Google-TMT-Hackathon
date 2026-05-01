@@ -131,10 +131,40 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FETCH — one text, one API call (no caching)
+// SIMPLE SESSION CACHE — avoid redundant API calls for identical text
 // ─────────────────────────────────────────────────────────────────────────────
-// Perform a single translation request to the configured API endpoint.
+const translationCache = new Map(); // text -> translation
+
+function getCacheKey(text, srcLang, tgtLang) {
+  return `${srcLang}:${tgtLang}:${text}`;
+}
+
+function getCachedTranslation(text, srcLang, tgtLang) {
+  const key = getCacheKey(text, srcLang, tgtLang);
+  return translationCache.get(key) || null;
+}
+
+function setCachedTranslation(text, srcLang, tgtLang, translation) {
+  const key = getCacheKey(text, srcLang, tgtLang);
+  // Simple eviction: cap at 1000 entries
+  if (translationCache.size > 1000) {
+    const firstKey = translationCache.keys().next().value;
+    translationCache.delete(firstKey);
+  }
+  translationCache.set(key, translation);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FETCH — one text, one API call (with session cache)
+// ─────────────────────────────────────────────────────────────────────────────
 async function doFetch(text, srcLang, tgtLang) {
+  // Check cache first
+  const cached = getCachedTranslation(text, srcLang, tgtLang);
+  if (cached) {
+    console.debug("[TMT] Cache HIT:", text.slice(0, 40));
+    return { success: true, text: cached };
+  }
+
   try {
     console.debug("[TMT] background -> doFetch", {
       srcLang,
@@ -189,7 +219,9 @@ async function doFetch(text, srcLang, tgtLang) {
     }
 
     if (data.message_type === "SUCCESS") {
-      return { success: true, text: data.output };
+      const translated = data.output;
+      setCachedTranslation(text, srcLang, tgtLang, translated);
+      return { success: true, text: translated };
     }
 
     console.warn("[TMT] API FAIL:", data.message);

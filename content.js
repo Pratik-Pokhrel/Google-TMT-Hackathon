@@ -89,10 +89,8 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   // ─────────────────────────────────────────────────────────────────────────────
   // BATCH TRANSLATION — combine sentences to reduce API calls
   // ─────────────────────────────────────────────────────────────────────────────
-  // Max chars per batch; the API's sentence-level limit is per individual
-  // sentence, but we batch at the content layer to reduce overhead.
-  const MAX_BATCH_CHARS = 500;
-  const BATCH_DELIM = "|||TMT_SPLIT|||"; // safe join delimiter for batch requests
+// Max chars per batch; small enough for quick API response
+  const MAX_BATCH_CHARS = 300;
 
   function batchNodes(nodes) {
     const batches = [];
@@ -207,7 +205,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // TRANSLATE ONE BATCH — single API call for multiple nodes
+  // TRANSLATE ONE BATCH — single API call for a small batch of nodes
   // ─────────────────────────────────────────────────────────────────────────────
   function translateOneBatch(batch, srcLang, tgtLang) {
     const { nodes, text } = batch;
@@ -222,57 +220,66 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
 
     return new Promise((resolve) => {
       try {
-        console.debug("[TMT] content -> sendMessage translateBatch", {
+        console.debug("[TMT] content -> translate batch", {
           srcLang,
           tgtLang,
           nodeCount: nodes.length,
-          text: text.slice(0, 120),
+          chars: text.length,
         });
       } catch (e) {}
-      // If the batch contains multiple nodes we join with a delimiter so
-      // the translated result can be split back into per-node pieces.
-      const payloadText = nodes.length > 1 ? nodes.map(n => (n.nodeValue || "").trim()).join(BATCH_DELIM) : text;
 
-      chrome.runtime.sendMessage({ action: "translate", text: payloadText, srcLang, tgtLang }, (response) => {
-        if (chrome.runtime.lastError) {
-          resolve();
-          return;
-        }
-        if (response?.success && response.text && response.text !== payloadText) {
-          if (mutationObserver) mutationObserver.disconnect();
-
-          const translated = response.text;
-          let parts = nodes.length > 1 ? translated.split(BATCH_DELIM) : [translated];
-
-          // Guard: ensure parts length matches nodes; if not, fallback to whole-text replacement
-          if (parts.length !== nodes.length) {
-            parts = nodes.map(() => translated);
+      // Send simple, single text to API (no delimiters)
+      chrome.runtime.sendMessage(
+        { action: "translate", text, srcLang, tgtLang },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            resolve();
+            return;
           }
 
-          for (let i = 0; i < nodes.length; i++) {
-            const node = nodes[i];
-            const original = originalTexts.get(node) || node.nodeValue || "";
-            const leading = original.match(/^\s*/)?.[0] || "";
-            const trailing = original.match(/\s*$/)?.[0] || "";
+          if (response?.success && response.text && response.text !== text) {
+            if (mutationObserver) mutationObserver.disconnect();
 
-            node.nodeValue = leading + (parts[i] || "") + trailing;
-            markTranslated(node);
+            const translated = response.text;
 
-            // Track progress per node
-            nodesTranslated++;
+            // For single node, apply directly
+            if (nodes.length === 1) {
+              const node = nodes[0];
+              const original = originalTexts.get(node) || node.nodeValue || "";
+              const leading = original.match(/^\s*/)?.[0] || "";
+              const trailing = original.match(/\s*$/)?.[0] || "";
+              node.nodeValue = leading + translated + trailing;
+              markTranslated(node);
+              nodesTranslated++;
+            } else {
+              // For multiple nodes, apply proportionally
+              const ratio = translated.length / text.length;
+              for (const node of nodes) {
+                const original = originalTexts.get(node) || node.nodeValue || "";
+                const trimmed = original.trim();
+                const expectedChars = Math.max(1, Math.round(trimmed.length * ratio));
+                const leading = original.match(/^\s*/)?.[0] || "";
+                const trailing = original.match(/\s*$/)?.[0] || "";
+
+                node.nodeValue = leading + translated.slice(0, expectedChars) + trailing;
+                markTranslated(node);
+                nodesTranslated++;
+              }
+            }
+
             updateProgressBar();
-          }
 
-          if (mutationObserver && translationEnabled) {
-            mutationObserver.observe(document.body, {
-              childList: true,
-              subtree: true,
-              characterData: false,
-            });
+            if (mutationObserver && translationEnabled) {
+              mutationObserver.observe(document.body, {
+                childList: true,
+                subtree: true,
+                characterData: false,
+              });
+            }
           }
-        }
-        resolve();
-      });
+          resolve();
+        },
+      );
     });
   }
 
@@ -284,44 +291,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   async function translateNodes(nodes, srcLang, tgtLang, runId) {
     // Prioritize visible content first
     const sorted = prioritizeNodes(nodes);
-
-    // First, do a bulk cache lookup so cached sentences can be applied
-    // immediately and not sent to the API. This reduces network calls and
-    // improves perceived responsiveness.
-    const texts = sorted.map(n => (n.nodeValue || "").trim());
-    const cacheResp = await new Promise((resolve) => {
-      try {
-        chrome.runtime.sendMessage({ action: "lookupCache", texts, srcLang, tgtLang }, (res) => resolve(res));
-      } catch (e) {
-        resolve(null);
-      }
-    });
-
-    const toTranslate = [];
-    if (cacheResp && cacheResp.results) {
-      for (let i = 0; i < sorted.length; i++) {
-        const node = sorted[i];
-        const t = texts[i];
-        const cached = cacheResp.results?.[t];
-        if (cached) {
-          if (!originalTexts.has(node)) originalTexts.set(node, node.nodeValue);
-          const original = originalTexts.get(node) || node.nodeValue || "";
-          const leading = original.match(/^\s*/)?.[0] || "";
-          const trailing = original.match(/\s*$/)?.[0] || "";
-          node.nodeValue = leading + cached + trailing;
-          markTranslated(node);
-          nodesTranslated++;
-          updateProgressBar();
-        } else {
-          toTranslate.push(node);
-        }
-      }
-    } else {
-      // If cache lookup failed, fall back to translating everything
-      toTranslate.push(...sorted);
-    }
-
-    const batches = batchNodes(toTranslate);
+    const batches = batchNodes(sorted);
 
     for (const batch of batches) {
       // Bail out if translation was toggled off or restarted

@@ -15,6 +15,8 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   let currentTgtLang = "ne";
   let mutationObserver = null;
   let progressLastSentAt = 0;
+  const localTranslationCache = new Map();
+  const inFlightTranslations = new Map();
   // Stores original nodeValue for every node we translate.
   // Used to restore the page without a reload when translation is toggled off.
   const originalTexts = new Map();
@@ -81,6 +83,19 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
       .filter(Boolean);
   }
 
+  function getNodePriority(node) {
+    const el = node?.parentElement;
+    if (!el) return 1;
+
+    const inMainContent = el.closest("main, article, [role='main']");
+    if (inMainContent) return 0;
+
+    const inPeripheral = el.closest("nav, header, footer, aside");
+    if (inPeripheral) return 2;
+
+    return 1;
+  }
+
   // ─────────────────────────────────────────────────────────────────────────────
   // DOM HELPERS
   // ─────────────────────────────────────────────────────────────────────────────
@@ -116,6 +131,54 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
 
   function unmarkTranslated() {
     // No DOM attributes are used anymore; originalTexts is the source of truth.
+  }
+
+  function getTranslationCacheKey(text, srcLang, tgtLang) {
+    return `${srcLang}:${tgtLang}:${text}`;
+  }
+
+  function requestTranslation(text, srcLang, tgtLang) {
+    const key = getTranslationCacheKey(text, srcLang, tgtLang);
+
+    const cached = localTranslationCache.get(key);
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+
+    const inFlight = inFlightTranslations.get(key);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        { action: "translate", text, srcLang, tgtLang },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn("[TMT] Message error:", chrome.runtime.lastError);
+            resolve(null);
+            return;
+          }
+
+          if (response?.success && response.text) {
+            localTranslationCache.set(key, response);
+            if (localTranslationCache.size > 1500) {
+              const oldestKey = localTranslationCache.keys().next().value;
+              localTranslationCache.delete(oldestKey);
+            }
+            resolve(response);
+            return;
+          }
+
+          resolve(response || null);
+        },
+      );
+    }).finally(() => {
+      inFlightTranslations.delete(key);
+    });
+
+    inFlightTranslations.set(key, promise);
+    return promise;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -156,36 +219,22 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
       return Promise.resolve();
     }
 
-    return new Promise((resolve) => {
-      chrome.runtime.sendMessage(
-        { action: "translate", text: payloadText, srcLang, tgtLang },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            console.warn("[TMT] Message error:", chrome.runtime.lastError);
-            resolve();
-            return;
-          }
+    return requestTranslation(payloadText, srcLang, tgtLang).then((response) => {
+      if (response?.success && response.text) {
+        const translated = response.text;
 
-          if (response?.success && response.text) {
+        // Apply the translation to the single node in this batch.
+        const firstNode = nodes[0];
+        const firstOriginal = originalTexts.get(firstNode) || firstNode.nodeValue || "";
+        const leading = firstOriginal.match(/^\s*/)?.[0] || "";
+        const trailing = firstOriginal.match(/\s*$/)?.[0] || "";
 
-            const translated = response.text;
+        firstNode.nodeValue = leading + translated + trailing;
+        markTranslated(firstNode);
+        nodesTranslated++;
 
-            // Apply the translation to the single node in this batch.
-            const firstNode = nodes[0];
-            const firstOriginal = originalTexts.get(firstNode) || firstNode.nodeValue || "";
-            const leading = firstOriginal.match(/^\s*/)?.[0] || "";
-            const trailing = firstOriginal.match(/\s*$/)?.[0] || "";
-
-            firstNode.nodeValue = leading + translated + trailing;
-            markTranslated(firstNode);
-            nodesTranslated++;
-
-            updateProgressBar();
-          }
-
-          resolve();
-        },
-      );
+        updateProgressBar();
+      }
     });
   }
 
@@ -197,11 +246,21 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   async function translateNodes(nodes, srcLang, tgtLang, runId) {
     const batches = batchNodes(nodes);
 
-    for (const batch of batches) {
+    for (let i = 0; i < batches.length; i += 1) {
+      const batch = batches[i];
       // Bail out if translation was toggled off or restarted
       if (!translationEnabled || runId !== translationRunId) break;
       await translateOneBatch(batch, srcLang, tgtLang);
+
+      // Yield occasionally so the page remains responsive while translating.
+      if (i > 0 && i % 20 === 0) {
+        await sleep(0);
+      }
     }
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   function enqueueTranslation(nodes, srcLang, tgtLang, runId) {
@@ -221,11 +280,32 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
     isTranslating = true;
 
     _pageNodes = getTextNodes(document.body);
+    const highPriorityNodes = [];
+    const mediumPriorityNodes = [];
+    const lowPriorityNodes = [];
+
+    for (const node of _pageNodes) {
+      const priority = getNodePriority(node);
+      if (priority === 0) highPriorityNodes.push(node);
+      else if (priority === 2) lowPriorityNodes.push(node);
+      else mediumPriorityNodes.push(node);
+    }
+
     totalNodesToTranslate = _pageNodes.length;
     nodesTranslated = 0;
     updateProgressBar();
 
-    await enqueueTranslation(_pageNodes, srcLang, tgtLang, runId);
+    // Translate main content first for better perceived speed.
+    const firstWave = [...highPriorityNodes, ...mediumPriorityNodes];
+    await enqueueTranslation(firstWave, srcLang, tgtLang, runId);
+
+    // Defer peripheral UI translation to background so browsing remains smooth.
+    if (lowPriorityNodes.length > 0) {
+      setTimeout(() => {
+        if (!translationEnabled || runId !== translationRunId) return;
+        enqueueTranslation(lowPriorityNodes, srcLang, tgtLang, runId);
+      }, 0);
+    }
 
     isTranslating = false;
   }
@@ -301,8 +381,14 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
         tgt: currentTgtLang,
       });
 
-      translatePage(currentSrcLang, currentTgtLang, runId);
-      startObserver(currentSrcLang, currentTgtLang, runId);
+      translatePage(currentSrcLang, currentTgtLang, runId)
+        .catch((err) => {
+          console.warn("[TMT] Initial translation failed:", err);
+        })
+        .finally(() => {
+          if (!translationEnabled || runId !== translationRunId) return;
+          startObserver(currentSrcLang, currentTgtLang, runId);
+        });
       sendResponse({ success: true });
     }
 
@@ -312,6 +398,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
       isTranslating = false;
       stopObserver();
       restorePage(); // revert all translations in-place — no reload
+      inFlightTranslations.clear();
       sendResponse({ success: true });
     }
 

@@ -13,16 +13,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Adaptive request gap:
-// - Start faster than 1s
-// - Fall back to 1s when API rate limits
-// - Recover to fast mode after stable successes
-const FAST_REQUEST_GAP_MS = 600;
-const SAFE_REQUEST_GAP_MS = 1000;
-const RECOVERY_SUCCESS_COUNT = 8;
-
-let currentRequestGapMs = FAST_REQUEST_GAP_MS;
-let successfulRequestsSinceFallback = 0;
+const REQUEST_GAP_MS = 1000;
 let backoffUntil = 0;
 let lastRequestStartedAt = 0;
 
@@ -30,6 +21,9 @@ const requestQueue = [];
 let isDrainingQueue = false;
 
 const translationCache = new Map();
+const CACHE_STORAGE_KEY = "tmtTranslationCacheV1";
+let cacheHydrated = false;
+let persistTimer = null;
 
 function getCacheKey(text, srcLang, tgtLang) {
   return `${srcLang}:${tgtLang}:${text}`;
@@ -40,6 +34,19 @@ function getCachedTranslation(text, srcLang, tgtLang) {
   return translationCache.get(key) || null;
 }
 
+function scheduleCachePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    const entries = [...translationCache.entries()];
+    chrome.storage.session.set({ [CACHE_STORAGE_KEY]: entries }, () => {
+      if (chrome.runtime.lastError) {
+        console.warn("[TMT] Cache persist failed:", chrome.runtime.lastError.message);
+      }
+    });
+  }, 350);
+}
+
 function setCachedTranslation(text, srcLang, tgtLang, translation) {
   const key = getCacheKey(text, srcLang, tgtLang);
   if (translationCache.size > 1000) {
@@ -47,34 +54,47 @@ function setCachedTranslation(text, srcLang, tgtLang, translation) {
     translationCache.delete(firstKey);
   }
   translationCache.set(key, translation);
+  scheduleCachePersist();
+}
+
+function hydrateCacheIfNeeded() {
+  if (cacheHydrated) return Promise.resolve();
+  cacheHydrated = true;
+
+  return new Promise((resolve) => {
+    chrome.storage.session.get([CACHE_STORAGE_KEY], (result) => {
+      if (chrome.runtime.lastError) {
+        console.warn("[TMT] Cache hydrate failed:", chrome.runtime.lastError.message);
+        resolve();
+        return;
+      }
+
+      const entries = result?.[CACHE_STORAGE_KEY];
+      if (Array.isArray(entries)) {
+        for (const [key, value] of entries) {
+          if (typeof key === "string" && typeof value === "string") {
+            translationCache.set(key, value);
+          }
+        }
+      }
+
+      resolve();
+    });
+  });
 }
 
 function onRateLimit(waitMs) {
-  currentRequestGapMs = SAFE_REQUEST_GAP_MS;
-  successfulRequestsSinceFallback = 0;
   backoffUntil = Date.now() + waitMs;
   console.warn(
-    `[TMT] Rate limited. Falling back to ${SAFE_REQUEST_GAP_MS}ms gap for now. Backing off ${Math.ceil(waitMs / 1000)}s.`,
+    `[TMT] Rate limited. Keeping ${REQUEST_GAP_MS}ms gap. Backing off ${Math.ceil(waitMs / 1000)}s.`,
   );
-}
-
-function onSuccessfulRequest() {
-  if (currentRequestGapMs !== SAFE_REQUEST_GAP_MS) return;
-  successfulRequestsSinceFallback += 1;
-  if (successfulRequestsSinceFallback >= RECOVERY_SUCCESS_COUNT) {
-    currentRequestGapMs = FAST_REQUEST_GAP_MS;
-    successfulRequestsSinceFallback = 0;
-    console.info(
-      `[TMT] Stable again. Retrying fast mode at ${FAST_REQUEST_GAP_MS}ms gap.`,
-    );
-  }
 }
 
 async function waitForRequestGap() {
   const now = Date.now();
   const sinceLastStart = now - lastRequestStartedAt;
-  if (sinceLastStart < currentRequestGapMs) {
-    await sleep(currentRequestGapMs - sinceLastStart);
+  if (sinceLastStart < REQUEST_GAP_MS) {
+    await sleep(REQUEST_GAP_MS - sinceLastStart);
   }
 }
 
@@ -112,6 +132,8 @@ async function drainQueue() {
 }
 
 async function doFetch(text, srcLang, tgtLang) {
+  await hydrateCacheIfNeeded();
+
   const cached = getCachedTranslation(text, srcLang, tgtLang);
   if (cached) {
     return { success: true, text: cached };
@@ -135,8 +157,8 @@ async function doFetch(text, srcLang, tgtLang) {
         ? numericRetryAfter * 1000
         : Number.isFinite(dateRetryAfter)
           ? Math.max(0, dateRetryAfter - Date.now())
-          : SAFE_REQUEST_GAP_MS;
-      const waitMs = Math.max(SAFE_REQUEST_GAP_MS, serverWaitMs);
+          : REQUEST_GAP_MS;
+      const waitMs = Math.max(REQUEST_GAP_MS, serverWaitMs);
       onRateLimit(waitMs);
       return null;
     }
@@ -161,7 +183,6 @@ async function doFetch(text, srcLang, tgtLang) {
     if (data.message_type === "SUCCESS") {
       const translated = data.output;
       setCachedTranslation(text, srcLang, tgtLang, translated);
-      onSuccessfulRequest();
       return { success: true, text: translated };
     }
 

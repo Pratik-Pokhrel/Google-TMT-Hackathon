@@ -1,8 +1,5 @@
 import { API_KEY, API_ENDPOINT } from "./config.js";
 
-// Validate that the required API configuration is present. This prevents
-// attempting network requests when the local config file is missing or
-// malformed. Returns true only when both the key and endpoint appear valid.
 function hasValidConfig() {
   return (
     typeof API_KEY === "string" &&
@@ -12,128 +9,27 @@ function hasValidConfig() {
   );
 }
 
-// Small utility to pause execution for the given number of milliseconds.
-// Used to implement rate limiting and backoff delays without blocking the
-// service worker event loop.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PER-TAB QUEUES
-//
-// Each tab gets its own isolated queue. Only the queue belonging to the
-// currently active/focused tab is allowed to drain — all others are paused.
-// This means:
-//   • Switching tabs immediately stops spending API quota on the background tab
-//   • Coming back to a tab resumes exactly where it left off
-//   • Rate limit (60 req/min) is respected globally via MIN_REQUEST_GAP_MS
-// ─────────────────────────────────────────────────────────────────────────────
-const MIN_REQUEST_GAP_MS = 1000;
+// Adaptive request gap:
+// - Start faster than 1s
+// - Fall back to 1s when API rate limits
+// - Recover to fast mode after stable successes
+const FAST_REQUEST_GAP_MS = 600;
+const SAFE_REQUEST_GAP_MS = 1000;
+const RECOVERY_SUCCESS_COUNT = 8;
+
+let currentRequestGapMs = FAST_REQUEST_GAP_MS;
+let successfulRequestsSinceFallback = 0;
 let backoffUntil = 0;
-let activeTabId = null; // currently focused tab
 let lastRequestStartedAt = 0;
 
-// Map<tabId, { queue: Array, isRunning: boolean }>
-const tabQueues = new Map();
+const requestQueue = [];
+let isDrainingQueue = false;
 
-// Return or create the per-tab queue object. Each tab has an isolated queue so
-// background processing can be paused when the tab is not active and resumed
-// when it becomes active again.
-function getTabQueue(tabId) {
-  if (!tabQueues.has(tabId)) {
-    tabQueues.set(tabId, { queue: [], isRunning: false });
-  }
-  return tabQueues.get(tabId);
-}
-
-// Enqueue a function to run for the given tab. The function will be executed
-// when the tab's queue is drained. Returns a promise that resolves with the
-// function result.
-function enqueueForTab(tabId, fn) {
-  return new Promise((resolve, reject) => {
-    const tq = getTabQueue(tabId);
-    tq.queue.push({ fn, resolve, reject });
-    if (!tq.isRunning) drainTab(tabId);
-  });
-}
-
-// Ensure a minimum time gap between request starts to comply with rate
-// limiting. If the last request started recently, wait the remaining time.
-async function waitForRequestGap() {
-  const now = Date.now();
-  const sinceLastStart = now - lastRequestStartedAt;
-  if (sinceLastStart < MIN_REQUEST_GAP_MS) {
-    await sleep(MIN_REQUEST_GAP_MS - sinceLastStart);
-  }
-}
-
-// Drain the queue for a specific tab. This function runs in a loop until the
-// queue is empty. It pauses when the tab is not active and respects global
-// backoff set after a 429 response. Each queued task is executed serially.
-async function drainTab(tabId) {
-  const tq = getTabQueue(tabId);
-  tq.isRunning = true;
-
-  while (tq.queue.length > 0) {
-    // Pause if this tab is not the active one — poll every 300ms until it is
-    while (tabId !== activeTabId) {
-      await sleep(300);
-      // If the tab was closed, discard its queue entirely
-      if (!tabQueues.has(tabId)) {
-        tq.isRunning = false;
-        return;
-      }
-    }
-
-    // Global 429 backoff
-    const now = Date.now();
-    if (now < backoffUntil) await sleep(backoffUntil - now);
-
-    await waitForRequestGap();
-
-    const item = tq.queue.shift();
-    if (!item) break;
-
-    try {
-      lastRequestStartedAt = Date.now();
-      const result = await item.fn();
-      item.resolve(result);
-    } catch (err) {
-      item.reject(err);
-    }
-  }
-
-  tq.isRunning = false;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TAB LIFECYCLE — track active tab, clean up closed tabs
-// ─────────────────────────────────────────────────────────────────────────────
-chrome.tabs.onActivated.addListener(({ tabId }) => {
-  activeTabId = tabId;
-});
-
-chrome.windows.onFocusChanged.addListener((windowId) => {
-  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
-  chrome.tabs.query({ active: true, windowId }, (tabs) => {
-    if (tabs[0]) activeTabId = tabs[0].id;
-  });
-});
-
-chrome.tabs.onRemoved.addListener((tabId) => {
-  tabQueues.delete(tabId);
-});
-
-// Initialise activeTabId on service worker startup
-chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-  if (tabs[0]) activeTabId = tabs[0].id;
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SIMPLE SESSION CACHE — avoid redundant API calls for identical text
-// ─────────────────────────────────────────────────────────────────────────────
-const translationCache = new Map(); // text -> translation
+const translationCache = new Map();
 
 function getCacheKey(text, srcLang, tgtLang) {
   return `${srcLang}:${tgtLang}:${text}`;
@@ -146,7 +42,6 @@ function getCachedTranslation(text, srcLang, tgtLang) {
 
 function setCachedTranslation(text, srcLang, tgtLang, translation) {
   const key = getCacheKey(text, srcLang, tgtLang);
-  // Simple eviction: cap at 1000 entries
   if (translationCache.size > 1000) {
     const firstKey = translationCache.keys().next().value;
     translationCache.delete(firstKey);
@@ -154,24 +49,75 @@ function setCachedTranslation(text, srcLang, tgtLang, translation) {
   translationCache.set(key, translation);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FETCH — one text, one API call (with session cache)
-// ─────────────────────────────────────────────────────────────────────────────
+function onRateLimit(waitMs) {
+  currentRequestGapMs = SAFE_REQUEST_GAP_MS;
+  successfulRequestsSinceFallback = 0;
+  backoffUntil = Date.now() + waitMs;
+  console.warn(
+    `[TMT] Rate limited. Falling back to ${SAFE_REQUEST_GAP_MS}ms gap for now. Backing off ${Math.ceil(waitMs / 1000)}s.`,
+  );
+}
+
+function onSuccessfulRequest() {
+  if (currentRequestGapMs !== SAFE_REQUEST_GAP_MS) return;
+  successfulRequestsSinceFallback += 1;
+  if (successfulRequestsSinceFallback >= RECOVERY_SUCCESS_COUNT) {
+    currentRequestGapMs = FAST_REQUEST_GAP_MS;
+    successfulRequestsSinceFallback = 0;
+    console.info(
+      `[TMT] Stable again. Retrying fast mode at ${FAST_REQUEST_GAP_MS}ms gap.`,
+    );
+  }
+}
+
+async function waitForRequestGap() {
+  const now = Date.now();
+  const sinceLastStart = now - lastRequestStartedAt;
+  if (sinceLastStart < currentRequestGapMs) {
+    await sleep(currentRequestGapMs - sinceLastStart);
+  }
+}
+
+function enqueueRequest(fn) {
+  return new Promise((resolve, reject) => {
+    requestQueue.push({ fn, resolve, reject });
+    if (!isDrainingQueue) {
+      drainQueue();
+    }
+  });
+}
+
+async function drainQueue() {
+  isDrainingQueue = true;
+  while (requestQueue.length > 0) {
+    const now = Date.now();
+    if (now < backoffUntil) {
+      await sleep(backoffUntil - now);
+    }
+
+    await waitForRequestGap();
+
+    const item = requestQueue.shift();
+    if (!item) break;
+
+    lastRequestStartedAt = Date.now();
+    try {
+      const result = await item.fn();
+      item.resolve(result);
+    } catch (err) {
+      item.reject(err);
+    }
+  }
+  isDrainingQueue = false;
+}
+
 async function doFetch(text, srcLang, tgtLang) {
-  // Check cache first
   const cached = getCachedTranslation(text, srcLang, tgtLang);
   if (cached) {
-    console.debug("[TMT] Cache HIT:", text.slice(0, 40));
     return { success: true, text: cached };
   }
 
   try {
-    console.debug("[TMT] background -> doFetch", {
-      srcLang,
-      tgtLang,
-      textLen: text.length,
-    });
-
     const response = await fetch(API_ENDPOINT, {
       method: "POST",
       headers: {
@@ -189,13 +135,10 @@ async function doFetch(text, srcLang, tgtLang) {
         ? numericRetryAfter * 1000
         : Number.isFinite(dateRetryAfter)
           ? Math.max(0, dateRetryAfter - Date.now())
-          : 61000;
-      const waitMs = Math.max(5000, serverWaitMs);
-      console.warn(
-        `[TMT] Rate limited. Backing off ${Math.ceil(waitMs / 1000)}s.`,
-      );
-      backoffUntil = Date.now() + waitMs;
-      return null; // signal to caller to re-enqueue
+          : SAFE_REQUEST_GAP_MS;
+      const waitMs = Math.max(SAFE_REQUEST_GAP_MS, serverWaitMs);
+      onRateLimit(waitMs);
+      return null;
     }
 
     const raw = await response.text();
@@ -205,22 +148,20 @@ async function doFetch(text, srcLang, tgtLang) {
     } catch {
       console.error(
         `[TMT] Non-JSON response (HTTP ${response.status}):`,
-        raw.slice(0, 50),
+        raw.slice(0, 120),
       );
       return { success: false, text };
     }
 
     if (!response.ok) {
-      console.error(
-        `[TMT] API error (HTTP ${response.status}):`,
-        data?.message,
-      );
+      console.error(`[TMT] API error (HTTP ${response.status}):`, data?.message);
       return { success: false, text };
     }
 
     if (data.message_type === "SUCCESS") {
       const translated = data.output;
       setCachedTranslation(text, srcLang, tgtLang, translated);
+      onSuccessfulRequest();
       return { success: true, text: translated };
     }
 
@@ -232,50 +173,33 @@ async function doFetch(text, srcLang, tgtLang) {
   }
 }
 
-function translateOne(tabId, text, srcLang, tgtLang) {
+function translateOne(text, srcLang, tgtLang) {
   if (!hasValidConfig()) {
-    console.error(
-      "[TMT] Missing config. Run: node scripts/generate-config.mjs",
-    );
+    console.error("[TMT] Missing config. Run: node scripts/generate-config.mjs");
     return Promise.resolve({ success: false, text });
   }
 
-  // Wrap the fetch attempt in the tab queue so requests are serialized per
-  // tab. If the API signals rate limiting the attempt will wait for the
-  // global backoff and then retry. The function returns a promise that
-  // resolves with the translation result.
-  const attempt = () =>
-    enqueueForTab(tabId, async () => {
-      while (true) {
-        const result = await doFetch(text, srcLang, tgtLang);
-        if (result !== null) return result;
+  return enqueueRequest(async () => {
+    while (true) {
+      const result = await doFetch(text, srcLang, tgtLang);
+      if (result !== null) return result;
 
-        const waitMs = Math.max(0, backoffUntil - Date.now());
-        if (waitMs > 0) await sleep(waitMs);
-        await waitForRequestGap();
-      }
-    });
-
-  return attempt();
+      const waitMs = Math.max(0, backoffUntil - Date.now());
+      if (waitMs > 0) await sleep(waitMs);
+      await waitForRequestGap();
+    }
+  });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MESSAGE LISTENER
-// ─────────────────────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "translate") {
-    const tabId = sender.tab?.id ?? activeTabId;
-    try {
-      console.debug("[TMT] background -> received translate", {
-        tabId,
-        src: request.srcLang,
-        tgt: request.tgtLang,
-        text: (request.text || "").slice(0, 120),
-      });
-    } catch (e) {}
-    translateOne(tabId, request.text, request.srcLang, request.tgtLang)
+    translateOne(request.text, request.srcLang, request.tgtLang)
       .then((result) => sendResponse(result))
       .catch(() => sendResponse({ success: false, text: request.text }));
     return true;
+  }
+
+  if (request.action === "ping") {
+    sendResponse({ alive: true });
   }
 });

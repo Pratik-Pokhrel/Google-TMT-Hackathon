@@ -14,6 +14,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   let currentSrcLang = "en";
   let currentTgtLang = "ne";
   let mutationObserver = null;
+  let progressLastSentAt = 0;
   // Stores original nodeValue for every node we translate.
   // Used to restore the page without a reload when translation is toggled off.
   const originalTexts = new Map();
@@ -28,6 +29,10 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
     const percentage = totalNodesToTranslate > 0 
       ? (nodesTranslated / totalNodesToTranslate) * 100 
       : 0;
+
+    const now = Date.now();
+    if (now - progressLastSentAt < 120 && percentage < 100) return;
+    progressLastSentAt = now;
     
     // Send progress update to popup
     try {
@@ -63,35 +68,8 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   ]);
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // VIEWPORT AWARENESS — prioritize visible content
+  // BATCH TRANSLATION — keep each text node isolated for correctness.
   // ─────────────────────────────────────────────────────────────────────────────
-  const visibleNodes = new Set();
-  const intersectionObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (entry.isIntersecting) {
-        visibleNodes.add(entry.target);
-      } else {
-        visibleNodes.delete(entry.target);
-      }
-    }
-  }, { rootMargin: "200px" }); // 200px buffer for pre-loading
-
-  function isNodeVisible(node) {
-    const el = node.parentElement;
-    return el && visibleNodes.has(el);
-  }
-
-  function prioritizeNodes(nodes) {
-    // Sort: visible nodes first, then rest
-    const visible = nodes.filter(isNodeVisible);
-    const hidden = nodes.filter(n => !isNodeVisible(n));
-    return [...visible, ...hidden];
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // BATCH TRANSLATION — keep each text node isolated so nothing gets skipped.
-  // ─────────────────────────────────────────────────────────────────────────────
-  const MAX_BATCH_CHARS = 300;
 
   function batchNodes(nodes) {
     return nodes
@@ -189,7 +167,6 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
           }
 
           if (response?.success && response.text) {
-            if (mutationObserver) mutationObserver.disconnect();
 
             const translated = response.text;
 
@@ -204,14 +181,6 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
             nodesTranslated++;
 
             updateProgressBar();
-
-            if (mutationObserver && translationEnabled) {
-              mutationObserver.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: false,
-              });
-            }
           }
 
           resolve();
@@ -226,9 +195,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   let _pageNodes = [];
 
   async function translateNodes(nodes, srcLang, tgtLang, runId) {
-    // Prioritize visible content first
-    const sorted = prioritizeNodes(nodes);
-    const batches = batchNodes(sorted);
+    const batches = batchNodes(nodes);
 
     for (const batch of batches) {
       // Bail out if translation was toggled off or restarted
@@ -269,14 +236,6 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   function startObserver(srcLang, tgtLang, runId) {
     if (mutationObserver) mutationObserver.disconnect();
 
-    // Observe all block elements for viewport detection
-    const blocks = document.querySelectorAll("p, h1, h2, h3, h4, h5, h6, li, div, article, section");
-    blocks.forEach(el => {
-      if (!visibleNodes.has(el)) {
-        intersectionObserver.observe(el);
-      }
-    });
-
     let debounceTimer = null;
     const pending = new Set();
 
@@ -288,15 +247,9 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
           if (added.nodeType === Node.TEXT_NODE) {
             const text = added.nodeValue;
             if (text && text.trim().length > 1) {
-              const parent = added.parentElement;
-              if (parent && !parent.hasAttribute(TRANSLATED_ATTR))
-                pending.add(added);
+              pending.add(added);
             }
           } else if (added.nodeType === Node.ELEMENT_NODE) {
-            // Observe new element for viewport detection
-            if (added.tagName && ["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI", "DIV", "ARTICLE", "SECTION"].includes(added.tagName)) {
-              intersectionObserver.observe(added);
-            }
             getTextNodes(added).forEach((n) => pending.add(n));
           }
         }
@@ -307,7 +260,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
         const nodes = [...pending];
         pending.clear();
         enqueueTranslation(nodes, srcLang, tgtLang, runId);
-      }, 400);
+      }, 120);
     });
 
     mutationObserver.observe(document.body, {
@@ -322,7 +275,6 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
       mutationObserver.disconnect();
       mutationObserver = null;
     }
-    intersectionObserver.disconnect();
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

@@ -14,6 +14,9 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   let currentSrcLang = "en";
   let currentTgtLang = "ne";
   let mutationObserver = null;
+  // Stores original nodeValue for every node we translate.
+  // Used to restore the page without a reload when translation is toggled off.
+  const originalTexts = new Map();
 
   // ─────────────────────────────────────────────────────────────────────────────
   // PROGRESS TRACKING
@@ -37,7 +40,6 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
     }
   }
 
-  const TRANSLATED_ATTR = "data-tmt-done";
   const SKIP_TAGS = new Set([
     "SCRIPT",
     "STYLE",
@@ -87,37 +89,19 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // BATCH TRANSLATION — group multiple nodes to reduce API calls
+  // BATCH TRANSLATION — keep each text node isolated so nothing gets skipped.
   // ─────────────────────────────────────────────────────────────────────────────
-  // Group nodes together (up to 300 chars) and send as single request.
   const MAX_BATCH_CHARS = 300;
 
   function batchNodes(nodes) {
-    const batches = [];
-    let current = { nodes: [], texts: [], chars: 0 };
-
-    for (const node of nodes) {
-      const txt = (node.nodeValue || "").trim();
-      const len = txt.length;
-
-      // If adding this node would exceed limit and we have content, start new batch
-      if (current.chars + len > MAX_BATCH_CHARS && current.nodes.length > 0) {
-        batches.push(current);
-        current = { nodes: [], texts: [], chars: 0 };
-      }
-
-      current.nodes.push(node);
-      current.texts.push(txt);
-      current.chars += len + 1; // +1 for space separator
-    }
-
-    if (current.nodes.length > 0) batches.push(current);
-    return batches;
+    return nodes
+      .map((node) => {
+        const txt = (node.nodeValue || "").trim();
+        if (!txt) return null;
+        return { nodes: [node], texts: [txt], chars: txt.length };
+      })
+      .filter(Boolean);
   }
-
-  // Stores original nodeValue for every node we translate.
-  // Used to restore the page without a reload when translation is toggled off.
-  const originalTexts = new Map();
 
   // ─────────────────────────────────────────────────────────────────────────────
   // DOM HELPERS
@@ -131,12 +115,11 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
         acceptNode(node) {
           const text = node.nodeValue;
           if (!text || text.trim().length < 2) return NodeFilter.FILTER_SKIP;
+          if (originalTexts.has(node)) return NodeFilter.FILTER_REJECT;
           let el = node.parentElement;
           while (el) {
             if (SKIP_TAGS.has(el.tagName)) return NodeFilter.FILTER_REJECT;
             if (el.isContentEditable) return NodeFilter.FILTER_REJECT;
-            if (el.hasAttribute(TRANSLATED_ATTR))
-              return NodeFilter.FILTER_REJECT;
             if (el === document.body) break;
             el = el.parentElement;
           }
@@ -150,41 +133,11 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
   }
 
   function markTranslated(node) {
-    let el = node.parentElement;
-    while (el && el !== document.body) {
-      const tag = el.tagName;
-      if (
-        [
-          "P",
-          "H1",
-          "H2",
-          "H3",
-          "H4",
-          "H5",
-          "H6",
-          "LI",
-          "TD",
-          "TH",
-          "SPAN",
-          "A",
-          "LABEL",
-          "BUTTON",
-          "DIV",
-        ].includes(tag)
-      ) {
-        el.setAttribute(TRANSLATED_ATTR, "1");
-        return;
-      }
-      el = el.parentElement;
-    }
-    if (node.parentElement)
-      node.parentElement.setAttribute(TRANSLATED_ATTR, "1");
+    originalTexts.set(node, originalTexts.get(node) || node.nodeValue || "");
   }
 
   function unmarkTranslated() {
-    document
-      .querySelectorAll(`[${TRANSLATED_ATTR}]`)
-      .forEach((el) => el.removeAttribute(TRANSLATED_ATTR));
+    // No DOM attributes are used anymore; originalTexts is the source of truth.
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +193,7 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
 
             const translated = response.text;
 
-            // Apply full translation to FIRST node, preserve whitespace
+            // Apply the translation to the single node in this batch.
             const firstNode = nodes[0];
             const firstOriginal = originalTexts.get(firstNode) || firstNode.nodeValue || "";
             const leading = firstOriginal.match(/^\s*/)?.[0] || "";
@@ -249,12 +202,6 @@ if (globalThis.__TMT_CONTENT_SCRIPT_LOADED__) {
             firstNode.nodeValue = leading + translated + trailing;
             markTranslated(firstNode);
             nodesTranslated++;
-
-            // Mark remaining nodes as done (clear them)
-            for (let i = 1; i < nodes.length; i++) {
-              markTranslated(nodes[i]);
-              nodesTranslated++;
-            }
 
             updateProgressBar();
 

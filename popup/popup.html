@@ -47,15 +47,22 @@
   </section>
 
   <section class="toggle-section">
-    <div class="toggle-label-row">
-      <span class="toggle-label" id="statusLabel">Translation OFF</span>
-      <label class="toggle-switch">
-        <input type="checkbox" id="mainToggle" />
-        <span class="slider"></span>
-      </label>
+    <div class="button-row">
+      <button id="translateBtn" class="translate-btn">START TRANSLATION</button>
+      <button id="stopBtn" class="stop-btn" disabled>STOP</button>
     </div>
-    <p class="toggle-hint" id="toggleHint">Toggle to translate this page</p>
+    <p class="toggle-hint" id="toggleHint">Click to translate this page</p>
   </section>
+
+  <div class="progress-container" id="progressContainer" style="display: none;">
+    <div class="progress-info">
+      <span class="progress-label">Translation Progress</span>
+      <span class="progress-percentage" id="progressPercentage">0%</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="progressFill" style="width: 0%"></div>
+    </div>
+  </div>
 
   <div class="status-bar" id="statusBar">
     <span class="status-dot" id="statusDot"></span>

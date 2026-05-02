@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TMT Local Test Page</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="hero">
+    <div class="hero__eyebrow">LOCAL HOST TEST PAGE</div>
+    <h1>Random Content Lab for TMT Extension</h1>
+    <p>
+      Use this page to test live translation, progress updates, batching, caching,
+      and viewport-aware rendering in a controlled environment.
+    </p>
+    <div class="hero__actions">
+      <a href="#article" class="btn btn--primary">Jump to article</a>
+      <button id="regenBtn" class="btn btn--secondary" type="button">Regenerate content</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar card">
+      <h2>Test Signals</h2>
+      <ul>
+        <li>Many repeated phrases for cache hits</li>
+        <li>Short and long text nodes for batching</li>
+        <li>Visible-first layout for viewport testing</li>
+        <li>Lazy sections below the fold</li>
+      </ul>
+      <div class="stats">
+        <div><span id="wordCount">0</span><small>words</small></div>
+        <div><span id="paraCount">0</span><small>blocks</small></div>
+        <div><span id="stamp">--</span><small>refresh</small></div>
+      </div>
+    </aside>
+
+    <article id="article" class="content card">
+      <section class="lead">
+        <h2>Live Translation Stress Test</h2>
+        <p class="muted">
+          This page intentionally mixes headings, repeated labels, paragraphs, callouts,
+          lists, and small text fragments to give the extension realistic content to parse.
+        </p>
+      </section>
+
+      <section id="storyBlocks"></section>
+
+      <section class="grid">
+        <div class="quote-box">
+          <h3>Repeated Phrase Area</h3>
+          <p>Share</p>
+          <p>Read more</p>
+          <p>Subscribe</p>
+          <p>Read more</p>
+          <p>Share</p>
+        </div>
+        <div class="quote-box">
+          <h3>Mixed Short Nodes</h3>
+          <p>Yes.</p>
+          <p>No.</p>
+          <p>Maybe.</p>
+          <p>Later.</p>
+          <p>Now.</p>
+        </div>
+      </section>
+
+      <section class="faq">
+        <h2>FAQ</h2>
+        <details open>
+          <summary>Will the extension translate visible content first?</summary>
+          <p>It should. Scroll slowly and watch the top sections update before the bottom of the article.</p>
+        </details>
+        <details>
+          <summary>Will repeated text be cached?</summary>
+          <p>Yes, repeated strings like menu labels and callouts should reuse previously translated text.</p>
+        </details>
+        <details>
+          <summary>Will the progress bar move in real time?</summary>
+          <p>It should update per batch. If it feels stuck, the batch size may be too large.</p>
+        </details>
+      </section>
+
+      <section class="table-wrap">
+        <h2>Structured Content</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Section</th>
+              <th>Type</th>
+              <th>Why it matters</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Intro</td><td>Heading + paragraph</td><td>Checks basic translation flow</td></tr>
+            <tr><td>Story</td><td>Large text blocks</td><td>Checks batching and scroll progress</td></tr>
+            <tr><td>Callouts</td><td>Repeated phrases</td><td>Checks cache effectiveness</td></tr>
+            <tr><td>FAQ</td><td>Mixed interactive HTML</td><td>Checks DOM safety on details/summary tags</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </article>
+  </main>
+
+  <footer class="footer card">
+    <p>
+      Use this page to observe whether text changes appear incrementally while the extension is running.
+    </p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

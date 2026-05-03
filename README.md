@@ -1,4 +1,4 @@
-# ENT Translator
+# TMT Web Translator
 
 This browser extension translates webpage text between English, Nepali, and Tamang using the TMT API.
 
@@ -134,3 +134,5 @@ If translation is not working, check in this order:
 5. Refreshed the target webpage.
 
 If it still fails, your token may be invalid or expired.
+
+Watch the demo here: [link](https://drive.google.com/drive/folders/1S0PBiUWRpWF2DInlpHtHImuCfko0Tsbr?usp=sharing)
